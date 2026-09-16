@@ -1,15 +1,8 @@
 {
-  "version": "4.2.0",
-  "html_url": "https://github.com/MerZlin/dsh-pet-indesktop/releases",
-  "notes": "v4.2.0：自 v4.1.0 以来的功能与修复汇总——单进程多开与同角色共享解码链、设置与菜单重构（右键菜单可编排、快捷启动、主题即时生效）、边缘探头/黄金回旋/撞飞彩蛋/省电模式、待办提醒、DSH 事件层与探索 Watchdog 控制链（replan/终止/忽略）、子肥鱼「只退出不删数据」、台词模板 v2 与表达风格、高刷屏流畅度与内存专项（3 窗 181–197MB）、DLC 换角色加固；系统通知仍未接入原生弹窗（以应用内右下角气泡代替）。",
+  "version": "4.3.0",
+  "html_url": "https://github.com/Ashurinnnn/dsh-pet-indesktop-v1/releases",
+  "notes": "v4.3.0（个人 fork 首次发布，macOS / Apple Silicon）：原生适配 Unsloth Studio 拉起的 dsh——自动发现标准/托管/临时 home，托管 home 走 cordis.patch.yml 补丁层 + 插件副本，不碰启动器的 package.json、不需要 pnpm、补丁层热加载免重启，临时实例按分钟巡检自动挂载，不再需要外部补丁脚本；agent 联动新增 Codex（只读 tail ~/.codex/sessions rollout，不装插件、不联网、不解析正文，子代理会话过滤）；桌宠名字与对你的称呼都可在 设置→外观→称呼与名字 里自定义；新增本机环境探测（dsh / Unsloth / Ollama / llama.cpp / LM Studio）并据此自适应，托管启动器掌管 dsh 时不再另起第二个实例；macOS 权限面收紧到「不申请任何隐私权限」（无用途声明、无 entitlements，屏幕录制在 macOS 上主动关死）；钥匙串只在必要时读取，可把本地部署的服务标记为「不需要 API Key」而完全不碰钥匙串；并修掉若干真实缺陷（依赖自动修复的信任边界、跨主机重定向泄露 Bearer 凭据、进程身份判定 fail-open、IPC socket 权限、配置与会话文件权限、构建脚本相对路径）。",
   "assets": {
-    "dsh-pet-standalone-webm-chat-setup.exe": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-chat-setup.exe",
-    "dsh-pet-standalone-webm-chat-portable.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-chat-portable.zip",
-    "dsh-pet-standalone-webm-setup.exe": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-setup.exe",
-    "dsh-pet-standalone-webm-portable.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-portable.zip",
-    "dsh-pet-standalone-webm-chat-macos-arm64.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-chat-macos-arm64.zip",
-    "dsh-pet-standalone-webm-macos-arm64.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-macos-arm64.zip",
-    "dsh-pet-standalone-webm-chat-linux-x86_64.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-chat-linux-x86_64.zip",
-    "dsh-pet-standalone-webm-linux-x86_64.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-linux-x86_64.zip"
+    "dsh-pet-standalone-webm-chat-macos-arm64.zip": "https://github.com/Ashurinnnn/dsh-pet-indesktop-v1/releases/download/v4.3.0/dsh-pet-standalone-webm-chat-macos-arm64.zip"
   }
 }

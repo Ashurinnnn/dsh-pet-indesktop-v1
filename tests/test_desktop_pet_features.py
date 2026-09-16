@@ -2680,8 +2680,13 @@ def test_product_copy_has_no_external_brand_reference():
                 "agent_link.py", "test_agent_link.py", "agent_registry.py",
                 "test_" + forbidden + "_monitor.py",
             }
+            # README 是"产品说明"，但它必须能讲清"这个项目集成了哪个 agent"——
+            # 与 agent_link.py 里放展示名是同一件事（设置页的开关行本来就会显示它）。
+            # 上游 README 原样保留为 README-UPSTREAM.md，同理豁免。
+            naming_docs = {"README.md", "README-UPSTREAM.md"}
             if (
                 path.name in naming_modules
+                or path.name in naming_docs
                 or path.name.endswith("-RESEARCH.md")
                 # Contributor/change reports are repository evidence, not
                 # user-facing product copy and may mention external brands.

@@ -22,7 +22,7 @@ from . import __version__
 
 # 与 pet/__init__.py 保持单一来源：发布时只改一处
 APP_VERSION = __version__
-REPO = 'MerZlin/dsh-pet-indesktop'
+REPO = 'Ashurinnnn/dsh-pet-indesktop-v1'
 RELEASE_API = f'https://api.github.com/repos/{REPO}/releases/latest'
 REPO_URL = f'https://github.com/{REPO}'
 # 夸克网盘备用下载地址（Windows 安装包镜像；菜单「夸克网盘下载」入口）
