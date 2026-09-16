@@ -181,7 +181,11 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             f.write(payload.decode("utf-8"))
             f.flush()
             os.fsync(f.fileno())
+        # 会话文件是**聊天原文**：默认 umask 下会是 0644，同机其他账号可读
+        # （macOS 靠 ~/Library 0700 兜着，Linux 的 $HOME 常见 0755）。
+        os.chmod(temp, 0o600)
         _replace_with_retry(temp, path)
+        os.chmod(path, 0o600)
     finally:
         temp.unlink(missing_ok=True)  # 异常路径清掉半成品 tmp
     _fsync_dir(path.parent)

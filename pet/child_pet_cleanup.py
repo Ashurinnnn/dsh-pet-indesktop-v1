@@ -121,17 +121,98 @@ def _pid_image_path(pid: int) -> str | None:
         return None
 
 
-def _is_pet_process(pid: int) -> bool:
-    """pid 对应的进程就是本程序（exe 路径与 sys.executable 一致）。
+def _posix_image_path(pid: int) -> str | None:
+    """macOS/Linux 上取进程可执行文件路径。
 
-    Windows 读不到镜像路径 = 受保护/无关进程，不放行；POSIX（macOS 无
-    /proc）读不到时保持既有行为放行。
+    macOS 没有 ``/proc``，用 libproc 的 ``proc_pidpath``（纯 ctypes，零依赖）；
+    Linux 走 ``/proc/<pid>/exe``。取不到返回 None。
+    """
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            buf = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+            if libproc.proc_pidpath(int(pid), buf, ctypes.sizeof(buf)) > 0:
+                return buf.value.decode("utf-8", "replace") or None
+            return None
+        except Exception:
+            return None
+    try:
+        return os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return None
+
+
+def _own_image_path() -> str | None:
+    """本进程真实的可执行文件路径。
+
+    不能直接用 ``sys.executable``：它可能是解释器的**符号链接/启动器**路径，而
+    内核记录的是另一条（macOS 上 Homebrew Python 的 ``bin/python3.13`` 与
+    ``Resources/Python.app/Contents/MacOS/Python`` 是两个不同文件）。
+    比"两个进程的镜像"而不是"镜像 vs sys.executable"，冻结版与源码运行都成立。
+    """
+    return _posix_image_path(os.getpid()) or sys.executable
+
+
+def _command_confirms_pet(pid: int) -> bool | None:
+    """命令行是否属于本项目：True/False，**读不到返回 None**（三值）。
+
+    源码运行时**所有** Python 进程的镜像都是同一个解释器二进制，光比镜像会把
+    别人的 Python 程序误判成小肥鱼，所以要再看一眼 argv。用绝对路径 ``/bin/ps``
+    且不经 shell（argv 数组）。
+
+    读不到命令行时返回 None 而不是 False：那种情况下"镜像一致"仍是有效判据
+    （冻结版尤其如此——只有同一个 .app 二进制才会命中），把它当成"不是"会让
+    "退出所有小肥鱼"在受限环境里静默失效。
+    """
+    for binary in ("/bin/ps", "ps"):
+        try:
+            result = subprocess.run(
+                [binary, "-o", "command=", "-p", str(int(pid))],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            continue
+        text = (result.stdout or "").strip()
+        if result.returncode == 0 and text:
+            return any(marker in text for marker in _PET_COMMAND_MARKERS)
+    return None
+
+
+_PET_COMMAND_MARKERS = (
+    "dsh-pet-standalone",   # 打包变体的可执行文件名
+    "-m pet",               # 源码运行：python -m pet
+    "pet_entry",            # 打包入口脚本（源码直跑入口时）
+    "pet/__main__.py",
+)
+
+
+def _is_pet_process(pid: int) -> bool:
+    """pid 对应的进程确实是本程序。
+
+    **取不到身份一律 fail-closed**（两个平台都是）。旧实现在 POSIX 上 fail-open
+    （``return os.name != "nt"``），而 macOS 没有 ``/proc`` —— "读不到镜像"成了
+    常态，于是任何一份伪造的 ``runtime-*.json``（或 slots 锁文件里的裸 pid）都能
+    让"退出所有小肥鱼"去 SIGTERM 任意同用户进程（编辑器、终端……）。
+    取不到身份就不动手，是这里唯一安全的方向。
     """
     img = _pid_image_path(pid)
+    if img is None and os.name != "nt":
+        img = _posix_image_path(pid)
     if img is None:
-        return os.name != "nt"
-    return (os.path.normcase(os.path.normpath(img))
-            == os.path.normcase(os.path.normpath(sys.executable)))
+        return False
+    if os.name == "nt":
+        # Windows 读到的就是精确镜像路径（且读不到时上面已 fail-closed）
+        return (os.path.normcase(os.path.normpath(img))
+                == os.path.normcase(os.path.normpath(sys.executable)))
+    own = _own_image_path()
+    if not own:
+        return False
+    if os.path.normcase(os.path.normpath(img)) != os.path.normcase(os.path.normpath(own)):
+        return False
+    # 镜像一致之后再看命令行：源码运行时"镜像"就是 Python 解释器本身，别人的
+    # Python 程序也会命中同一个镜像。读不到命令行时按镜像判定（见三值说明）。
+    return _command_confirms_pet(pid) is not False
 
 
 def _slot_lock_pids(root: Path) -> list[int]:

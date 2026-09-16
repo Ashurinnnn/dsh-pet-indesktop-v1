@@ -97,6 +97,10 @@ for variant in "${variant_list[@]}"; do
     "$PYTHON_BIN" -m PyInstaller "${args[@]}" "$entry"
     # 中文编码自检（issue #26）：字节码/资源/文件名被编码污染即中止。
     "$PYTHON_BIN" scripts/check_bundle_encoding.py --dir "$DIST_DIR/$name.app"
+    # 权限面闸门：产物不得声明任何隐私用途、不得带 entitlements、不得打包会碰
+    # 隐私框架的模块。桌宠在 macOS 上只需要出网 + 用户自己给的 API Key，
+    # 多出一项就是多一扇门（详见 docs/MACOS-PERMISSIONS.md）。
+    "$PYTHON_BIN" scripts/check_macos_permissions.py --app-dir "$DIST_DIR/$name.app"
     # Bridge 零依赖防线（2026-09 事故：缺 @deepseek-ai/dsh-llm 导致用户整个
     # dsh 插件树加载失败）：剥掉 --add-data 可能带入的 node_modules 残留，
     # 校验 dist 副本清单零依赖并跑 hermetic 冒烟（见 fix_bridge_bundle.py）。

@@ -226,11 +226,30 @@ def get_system_idle_seconds() -> float:
     return 0.0
 
 
+def screen_capture_supported() -> bool:
+    """屏幕截图是否可用——**只在 Windows 可用**。
+
+    这不只是"Windows 专有 API"的问题，更是一条**权限边界**：在 macOS 上
+    ``PIL.ImageGrab`` 会调用 ``/usr/sbin/screencapture``，从而触发系统的
+    「屏幕录制」授权申请——那是一项能读遍整块屏幕（含密码框、私信、文档）的
+    敏感权限。而桌宠在 macOS 上根本拿不到前台窗口信息
+    （``foreground_window_info`` 是 Windows 专有实现，非 Windows 恒返回 None），
+    "看看屏幕"只剩一张没有上下文的截图，没有任何理由为它去要这项权限。
+
+    因此"没有能力申请"由两层保证：
+    1. 菜单项在 macOS 上不存在（``on_look_screen`` 不接线 → Capability Unavailable）；
+    2. 这两个捕获入口即便被误接线，也会在这里被直接拒绝。
+    """
+    return sys.platform == "win32"
+
+
 def capture_window_rect(rect: tuple[int, int, int, int] | None) -> Any:
     """抓取指定窗口区域（rect: (x, y, w, h) 屏幕全局坐标）。
     仅允许在后台 worker 线程调用！
     针对多屏负坐标：抓取全屏后按虚拟屏幕原点平移裁剪。
     """
+    if not screen_capture_supported():
+        return None
     from PIL import ImageGrab  # 懒导入：PIL 不随模块加载常驻（见模块头注释）
     if not rect or rect[2] <= 0 or rect[3] <= 0:
         return None
@@ -277,7 +296,13 @@ def foreground_app_info() -> str:
 
 
 def capture_screen_bytes() -> bytes:
-    """截全屏（含多显示器）→ 缩到最长边 MAX_EDGE → 内存 JPEG bytes，全程不落盘。"""
+    """截全屏（含多显示器）→ 缩到最长边 MAX_EDGE → 内存 JPEG bytes，全程不落盘。
+
+    仅 Windows 可用，理由见 :func:`screen_capture_supported`（macOS 上这条路会
+    申请「屏幕录制」权限，桌宠不需要它）。
+    """
+    if not screen_capture_supported():
+        raise VisionError("屏幕截图在当前平台不可用（仅 Windows）")
     import io
     from PIL import Image, ImageGrab  # 懒导入：PIL 不随模块加载常驻（见模块头注释）
     img = ImageGrab.grab(all_screens=True)

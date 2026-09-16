@@ -259,6 +259,13 @@ class _CollisionWorker(QObject):
                 server.deleteLater()
                 self._connect_client()
                 return
+        # 只允许同一用户连接。Qt 默认 NoOptions，POSIX 下 socket 文件按 umask 建成
+        # 0755；虽然它落在每用户 0700 的 $TMPDIR 里（跨用户已被挡住），但同用户下
+        # 任何进程都能连进来注入幽灵桌宠的状态。显式要求用户级访问。
+        try:
+            server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+        except Exception:
+            pass  # 平台不支持时保持默认
         if not server.listen(self.name):
             # POSIX 下被杀死/崩溃的旧协调者会残留 socket 文件，listen 报
             # AddressInUseError（Windows 命名管道随进程死亡回收，无此问题）。
@@ -277,7 +284,24 @@ class _CollisionWorker(QObject):
             self._coordinator_lock = None
             self._connect_client()
             return
+        self._restrict_socket_file(server)
         self._become_listener(server)
+
+    @staticmethod
+    def _restrict_socket_file(server) -> None:
+        """把 POSIX 下的 socket 文件收紧到 0600（尽力而为）。
+
+        Qt 的 socketOptions 在部分平台不落地到文件模式，这里补一刀：同用户下
+        任何进程都能连进来注入状态，能收紧就收紧。
+        """
+        if sys.platform == "win32":
+            return  # Windows 走命名管道，无文件模式
+        try:
+            name = str(server.fullServerName() or "")
+            if name and os.path.exists(name):
+                os.chmod(name, 0o600)
+        except Exception:
+            logging.debug("收紧 IPC socket 权限失败", exc_info=True)
 
     def _become_listener(self, server) -> None:
         """listen 成功后的收敛：进程内同名候选去重，登记并启动决胜探测。"""

@@ -1030,6 +1030,32 @@ def _safe_mtime(path: Path) -> float:
         return 0.0
 
 
+def _exclusively_owned(path: Path) -> bool:
+    """路径及其**所有祖先目录**都不许对 group/other 可写。
+
+    为什么必须有这道门：依赖规格自动修复会把 ``link:`` 指向"猜出来的"目录，而
+    dsh 下次加载 profile 时会**执行**该目录里的 JS（``index.js``）。候选目录若落在
+    别人可写的地方，等于把代码执行权交给对方——macOS 上 ``/Applications`` 就是
+    ``drwxrwxr-x root:admin``，另一个 admin 账号可以往里面放目录。只读检查不够，
+    因为 dsh 会执行它。
+
+    所以只接受"从该目录一路到根都没有 group/other 写位"的候选；有任何一层不满足
+    就当作没有候选（宁可不修，不可乱改）。
+    """
+    try:
+        current = path if _safe_is_dir(path) else path.parent
+        for _ in range(64):  # 有界：真实深度远小于此，防符号链接环
+            if current.stat().st_mode & 0o022:
+                return False
+            parent = current.parent
+            if parent == current:
+                return True
+            current = parent
+    except OSError:
+        return False
+    return False
+
+
 def _suggest_path_replacement(
     missing: Path, *, max_ancestors: int = 5, scan_cap: int = 200,
 ) -> Path | None:
@@ -1038,7 +1064,10 @@ def _suggest_path_replacement(
     两类真实场景：
     1. 名字里带版本：`pkg-0.12.80.tgz` → 磁盘上是 `pkg-0.13.6.tgz`；
     2. 上层目录改名：`dist-onedir/<旧构建名>/.../dsh-pet-bridge` → 新构建名下的同一相对路径。
-    只做有界扫描，且只给建议（绝不自动改写用户的 package.json）。
+
+    只做有界扫描，且**候选必须落在只有当前用户可写的目录里**（见
+    :func:`_exclusively_owned`）——这个建议随后会被写进 package.json 并被 dsh
+    执行，所以它同时是一条信任边界。
 
     全程用 `_safe_*` 探测：任何文件系统错误都退化为"没有建议"，绝不往外抛。
     """
@@ -1051,8 +1080,9 @@ def _suggest_path_replacement(
                 entry for entry in _bounded_children(parent, scan_cap)
                 if entry.name.startswith(prefix) and entry.name.endswith(suffix)
             ]
-            if siblings:
-                return _newest(siblings)
+            trusted = [c for c in siblings if _exclusively_owned(c)]
+            if trusted:
+                return _newest(trusted)
 
     parts = missing.parts
     for depth in range(1, min(max_ancestors, len(missing.parents) - 1) + 1):
@@ -1064,7 +1094,7 @@ def _suggest_path_replacement(
             candidate for entry in _bounded_children(base, scan_cap)
             if _safe_is_dir(entry)
             for candidate in [entry.joinpath(*tail)]
-            if _safe_is_dir(candidate)
+            if _safe_is_dir(candidate) and _exclusively_owned(candidate)
         ]
         if matches:
             return max(matches, key=_safe_mtime)

@@ -1,10 +1,41 @@
 from __future__ import annotations
-import json, ssl, threading, urllib.error, urllib.request
+import json, ssl, threading, urllib.error, urllib.parse, urllib.request
 from collections.abc import Iterator
 from typing import Any
 from .models import ProviderConfig
 
 import re as _re
+
+
+class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """拒绝跨主机（含 scheme/端口变化）重定向。
+
+    urllib 默认跟随重定向，而 ``HTTPRedirectHandler.redirect_request`` **保留了
+    Authorization 头**（只丢 Content-Length / Content-Type）。于是 307/308 能把
+    Bearer 凭据原样重发到另一台主机——用户把 base_url 配成明文 http 的局域网地址
+    （本机真实配置就是 ``http://192.168.x.x:8904``）时，中途改一个 ``Location``
+    就能同时拿走 API Key 与聊天内容。
+
+    原则与 ``vision`` 里那条"独立视觉端点绝不许复用聊天 Key"一致：**凭据只能发往
+    它被配置的那台主机**。同主机内的路径重定向（补斜杠、跳 /v1）仍然放行。
+    """
+
+    @staticmethod
+    def _origin(url: str) -> tuple:
+        parts = urllib.parse.urlsplit(url)
+        return (parts.scheme, parts.hostname, parts.port)
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if self._origin(req.full_url) != self._origin(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, "已拒绝跨主机重定向（避免把凭据转发到别的主机）", headers, fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# 进程级安装：本模块是所有带凭据请求（聊天 / 识屏 / 余额）的必经之路，在这里装一次
+# 就全覆盖；各调用点仍走 urllib.request.urlopen，保持既有的可打桩接缝不变。
+urllib.request.install_opener(urllib.request.build_opener(_SameHostRedirectHandler()))
 
 try:
     import certifi

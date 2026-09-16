@@ -427,7 +427,17 @@ class PetInstance:
         win.on_show_balance = self._slot_wrap(self.shell.show_balance) if self.enable_chat else None
         win.on_check_update = self._slot_wrap(self.shell.check_update)
         win.on_look_synced = self._slot_wrap(self.sync_look_to_chat) if self.enable_chat else None
-        win.on_look_screen = win.look_at_screen if self.enable_chat and hasattr(win, "look_at_screen") else None
+        # 「看看屏幕」在 macOS 上不接线：菜单项会按"能力不可用"整体消失，而不是
+        # 留一个点了就申请「屏幕录制」权限、且截完还没有前台窗口上下文的入口。
+        # 详见 vision.screen_capture_supported。
+        from . import vision as _vision_mod
+
+        win.on_look_screen = (
+            win.look_at_screen
+            if self.enable_chat and _vision_mod.screen_capture_supported()
+            and hasattr(win, "look_at_screen")
+            else None
+        )
         win.on_open_legacy_settings = None
         win.on_open_modern_settings = self._slot_wrap(self.open_modern_settings)
         win.on_spawn_pet = self._slot_wrap(self.shell.spawn_pet)

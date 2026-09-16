@@ -499,9 +499,16 @@ class TestVisionAndWatcherPhase2:
         assert received[0][3] == big_hash
 
     def test_capture_window_rect_coordinates_and_clamping(self, monkeypatch):
+        """裁剪/夹取坐标的算术与平台无关，所以这里把"截图可用"打开来测它。
+
+        真实平台上截图只在 Windows 提供（macOS 上它会申请「屏幕录制」权限，
+        见 docs/MACOS-PERMISSIONS.md），这条边界由
+        tests/test_macos_permission_surface.py 单独把关。
+        """
         from pet import vision
         from PIL import Image
 
+        monkeypatch.setattr(vision, "screen_capture_supported", lambda: True)
         # 创建一个 1000x1000 的虚拟屏幕
         fake_all_screen = Image.new("RGB", (1000, 1000), color=(50, 100, 150))
         # vision 的 PIL 已下沉为函数内懒导入，直接 patch PIL.ImageGrab 本体

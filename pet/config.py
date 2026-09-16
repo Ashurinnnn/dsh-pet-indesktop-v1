@@ -588,6 +588,23 @@ def _clean_collision_data(value: dict) -> dict:
     return result
 
 
+def _chmod_private(path: Path) -> None:
+    """把文件收紧到 0600（失败只记日志：个别文件系统不支持改权限）。"""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        logging.debug("收紧文件权限失败: %s", path)
+
+
+def _mkdir_private(path: Path) -> None:
+    """建目录并收紧到 0700（已存在也收紧一次：老版本建出来的是 0755）。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+    except OSError:
+        logging.debug("收紧目录权限失败: %s", path)
+
+
 class Config:
     def __init__(self, base=None, instance_id: str | None = None):
         base = Path(base) if isinstance(base, str) else (base or _default_base())
@@ -1429,13 +1446,20 @@ class Config:
         """
         try:
             self._normalize_pet_settings()
-            self.dir.mkdir(parents=True, exist_ok=True)
+            _mkdir_private(self.dir)
             temp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
             temp.write_text(
                 json.dumps(self._redacted_data(), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            # 配置里没有明文 Key，但仍有位置、会话参数、用户偏好这类私事；默认
+            # umask 会写成 0644。macOS 上靠 ~/Library 的 0700 兜着，Linux 的
+            # $HOME 常见 0755——不设权限就是同机人人可读。atomic replace 会把
+            # 目标换成临时文件的模式，所以先收紧临时文件，替换后再收紧一次
+            # （顺带把用户手动 chmod 过、又被这次替换覆盖的权限补回来）。
+            _chmod_private(temp)
             os.replace(temp, self.path)
+            _chmod_private(self.path)
         except OSError as exc:
             logging.warning("保存配置失败: %s (%s)", self.path, exc)
             return False
