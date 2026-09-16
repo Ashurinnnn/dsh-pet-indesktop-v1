@@ -317,6 +317,7 @@ class TestAgentLinkManager:
             "claude": False,
             "cursor": False,
             "opencode": False,
+            "codex": False,
             "custom_agents": [],
             "report_gates": {
                 "state": 1.0,

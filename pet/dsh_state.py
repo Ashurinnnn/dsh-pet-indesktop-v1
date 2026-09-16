@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 import weakref
 from enum import Enum
@@ -37,6 +36,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import harness_launcher
+from . import local_env
 from .agent_link import DirGlobTailer
 
 log = logging.getLogger("dsh-pet-standalone")
@@ -318,22 +318,12 @@ class DshStateTracker(QObject):
     def _candidate_ports(self) -> list[int]:
         """待探测的 DSH 端口候选。
 
-        DSH 可能跑在 3080（web 真实默认）或 38080（桌宠 harness_launcher 启动
-        时的避让端口），也可能通过 DSH_PORT 环境变量指定——全部探测，任一在线
-        即视为 DSH 在线（兼容「用户自己开的 DSH」与「桌宠一键启动的 DSH」）。
+        DSH 可能跑在 3080（web 真实默认）、38080（桌宠 harness_launcher 的避让
+        端口），也可能由 DSH_PORT 指定，或由**托管启动器**（Unsloth Studio 等）
+        拉起——任一在线即视为 DSH 在线。端口清单与 harness_launcher 共用
+        ``local_env.dsh_service_ports``，避免两处各维护一份、漏掉对方的端口。
         """
-        ports: set[int] = set()
-        if self.port is not None:
-            ports.add(int(self.port))
-        env_port = os.environ.get("DSH_PORT")
-        if env_port:
-            try:
-                ports.add(int(env_port))
-            except (TypeError, ValueError):
-                pass
-        ports.add(3080)   # DSH web 默认端口
-        ports.add(38080)  # harness_launcher 启动默认端口
-        return sorted(ports)
+        return local_env.dsh_service_ports(self.port)
 
     def _detect_online(self) -> bool:
         """同步探测任一候选端口在线即视为 DSH 在线。异常绝不外抛。"""

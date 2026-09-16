@@ -78,11 +78,58 @@ def test_endpoint_bare_host_appends_default_path():
 
 
 def test_vision_overrides_ignored_when_same_as_chat():
-    """同聊天模型时，视觉独立端点/密钥一律不得生效（防残留 GLM 地址配 ds 模型名）。"""
+    """同聊天模型时，视觉独立端点/密钥一律不得生效（防残留 GLM 地址配 ds 模型名）。
+
+    回归加强（安全审计 R2）：勾了"独立端点"却把地址留空时，请求其实落回聊天
+    地址——此时视觉 Key 同样不得生效，否则另一家平台的 Key 会以 Bearer 出现在
+    聊天服务商的请求里。判据因此是"这次请求实际打到哪个主机"
+    （``vision_endpoint_is_chat``），而不是用户勾了哪个开关。
+    """
     import inspect
     from pet import vision
     src = inspect.getsource(vision._post_vision_request)
-    assert 'if p.vision_same_as_chat' in src
+    assert 'if vision_endpoint_is_chat:' in src, "端点选择必须按实际主机判定"
+    assert src.count('vision_endpoint_is_chat') >= 3, (
+        "端点与密钥必须共用同一个判据，不许各判各的"
+    )
+
+
+def test_independent_vision_with_blank_url_never_sends_vision_key_to_chat_host(monkeypatch):
+    """安全回归 R2：独立端点地址留空 → 请求发往聊天主机 → 只能带聊天 Key。
+
+    实测可达路径：用户在"视觉 API Key"里填了另一家平台的 Key，但"视觉 API 地址"
+    留空（UI 明确鼓励留空＝复用聊天地址）。修复前该 Key 会被发到聊天服务商，
+    留在对方日志里。
+    """
+    from pet import vision
+    from pet.chat.models import ProviderConfig
+
+    called_with = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        called_with["url"] = req.full_url
+        called_with["headers"] = dict(req.header_items())
+        return _FakeResponse({"choices": [{"message": {"content": "好呀"}, "finish_reason": "stop"}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    p = ProviderConfig.from_dict("test", {
+        "model": "deepseek-v4-flash",
+        "base_url": "https://api.deepseek.com",
+        "api_key": "sk-chat-secret",
+        "vision_same_as_chat": False,
+        "vision_base_url": "",              # ← 留空：端点落回聊天地址
+        "vision_api_key": "sk-other-vendor-secret",
+    })
+    reply = vision._post_vision_request(b"fake-jpeg", "code.exe | t", "sys", p)
+
+    assert reply == "好呀"
+    assert "api.deepseek.com" in called_with["url"], "地址留空时应落回聊天端点"
+    auth = called_with["headers"].get("Authorization", "")
+    assert auth == "Bearer sk-chat-secret", (
+        "发往聊天主机的请求只能带聊天 Key；带别的平台的 Key 就是凭据错配外泄"
+    )
+    assert "sk-other-vendor-secret" not in str(called_with["headers"])
 
 
 class _FakeResponse:

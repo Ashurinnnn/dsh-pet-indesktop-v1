@@ -531,7 +531,12 @@ def test_pick_instrumental_hint_returns_member():
     )
 
     for _ in range(20):
-        assert pick_instrumental_hint() in INSTRUMENTAL_HINTS
+        # 返回的是**已填好称呼**的文案（内置串里写的是 {user} 占位符），
+        # 所以拿填充后的期望集合比对，而不是原始常量表。
+        from pet import user_address
+
+        expected = {user_address.fill(hint) for hint in INSTRUMENTAL_HINTS}
+        assert pick_instrumental_hint() in expected
 
 
 def test_now_listening_template():

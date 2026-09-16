@@ -321,7 +321,13 @@ def _post_vision_request(
     from .chat.providers import _make_ssl_context, normalize_chat_endpoint, build_browser_headers
     # 视觉独立端点仅在「不同聊天模型」时生效；同聊天模型时强制跟随聊天配置，
     # 否则残留的 GLM 地址会配上 ds 的模型名发出（modelCode 不存在）
-    base_url = p.base_url if p.vision_same_as_chat else (p.vision_base_url or p.base_url)
+    #
+    # 注意"独立端点"必须真的独立：勾了独立、地址却留空时 base_url 会落回聊天
+    # 地址，此时**不能再按独立端点取 Key**——否则另一家平台的视觉 Key 会以
+    # Bearer 形式出现在聊天服务商的请求里（对方日志里就留住了）。凭据必须与
+    # 它实际被发往的主机同源，下面的 key 选择据此对齐。
+    vision_endpoint_is_chat = p.vision_same_as_chat or not str(p.vision_base_url or "").strip()
+    base_url = p.base_url if vision_endpoint_is_chat else p.vision_base_url
     endpoint = normalize_chat_endpoint(base_url, p.chat_path)
     b64 = base64.b64encode(jpeg_bytes).decode('ascii')
     note = app_info or '（拿不到前台窗口信息）'
@@ -363,10 +369,11 @@ def _post_vision_request(
         # ds 视觉模型默认开推理（思考十几秒才说话），关掉后 1~2 秒直答
         payload['thinking'] = {'type': 'disabled'}
     headers = build_browser_headers({'Content-Type': 'application/json'})
-    # 安全（高优先）：独立视觉端点（vision_same_as_chat=False）绝不能把聊天 Key
-    # 一起发过去。只有与聊天同模型时才允许复用聊天 Key；独立端点只认视觉自己的
-    # Key（含钥匙串解析），缺失时直接报错，绝不回退到聊天 Key。
-    if p.vision_same_as_chat:
+    # 安全（高优先）：独立视觉端点绝不能把聊天 Key 一起发过去；反过来，**落回
+    # 聊天地址时也不能把独立视觉 Key 发过去**。判据是"这次请求实际打到哪个主机"
+    # （vision_endpoint_is_chat），不是用户勾了哪个开关——勾了独立但地址留空时，
+    # 端点就是聊天端点，key 也只能是聊天 key。
+    if vision_endpoint_is_chat:
         api_key = p.api_key
     else:
         vkey = p.vision_api_key

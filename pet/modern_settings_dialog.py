@@ -148,6 +148,7 @@ from .persona_template import (
     CONDITIONAL_PARAMETERS,
     PARAMETERS,
 )
+from . import settings_env_panel
 from . import settings_pet_controls
 from .report_gates import REPORT_GATE_KEYS, REPORT_GATE_LABELS, gate_for_event
 
@@ -411,6 +412,8 @@ class ModernSettingsDialog(QDialog):
                     self.dock_icon_check,
                 )
             )
+        # 本机环境跟着"应用启动"走：在此决定要不要让桌宠自己拉 dsh，就该看得见本机已有什么。
+        launch_rows.extend(settings_env_panel.env_rows(self))
         general_layout.addWidget(SettingsSection("应用启动", launch_rows, general_content))
         window_rows = [
             SettingRow("on_top", "窗口置顶", "始终将桌宠保持在其他窗口上方。", self.on_top_check),
@@ -1647,7 +1650,7 @@ class ModernSettingsDialog(QDialog):
 
         general = page_content(
             [
-                ("应用启动", claim("autostart", "harness_autostart")),
+                ("应用启动", claim("autostart", "harness_autostart", "local_env_refresh") + claim_prefix("local_env_")),
                 ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough", "stream_capture")),
                 ("多开", claim("single_process_spawn")),
             ]
@@ -1662,7 +1665,7 @@ class ModernSettingsDialog(QDialog):
         )
         pet = page_content(
             [
-                ("显示", claim("scale", "pet_opacity")),
+                ("显示", claim("scale", "pet_opacity", "pet_name", "user_address")),
                 ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
                 ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead")),
                 ("拖拽与弹射", claim("drag_physics", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),

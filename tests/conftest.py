@@ -21,6 +21,7 @@
    monkeypatch（test_agent_link / test_proactive 已如此）。
 """
 
+import os
 import sys
 
 import pytest
@@ -71,6 +72,76 @@ def _no_modal_message_boxes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_local_env(monkeypatch):
+    """默认让测试面对一台"什么都没装"的机器。
+
+    ``local_env`` 会探测真实可执行文件、/Applications、托管 dsh home 与本地端口。
+    不隔离的话，用例结果取决于跑测试这台机器装了什么——本机装了 dsh + Unsloth，
+    于是 ``harness_launcher.launch_harness()`` 认为"dsh 由托管启动器掌管"而拒绝
+    自启，一堆与本次改动无关的用例就红了（这正是"测试读到开发者真实机器"的
+    老问题，见 ``_isolate_dsh_homes`` / ``_no_real_dsh_profile_write``）。
+
+    需要覆盖探测行为的用例自行 monkeypatch 更靠里的探测点
+    （tests/test_local_env.py 已经这么做）。
+    """
+    try:
+        from pet import local_env
+    except Exception:
+        return
+    monkeypatch.setattr(local_env, "_which", lambda name, path=None: None)
+    monkeypatch.setattr(local_env, "_app_bundle_exists", lambda name: False)
+    monkeypatch.setattr(local_env, "_port_open", lambda port, host="127.0.0.1": False)
+
+
+@pytest.fixture(autouse=True)
+def _fake_keyring(monkeypatch):
+    """全程用内存假钥匙串，**绝不碰系统钥匙串**。
+
+    为什么必须全局拦：``Config.reload()`` 的明文迁移与 ``resolve_api_key()`` 都会
+    走 ``pet.chat.models.SecretStore``；只要用例里出现过一个带明文 api_key 的
+    provider，或构造过设置对话框（AI 设置页会解析已存 key 来显示），就会读真实的
+    系统钥匙串。在 macOS 上那是一次 SecurityAgent 授权弹窗——跑一遍测试套件会
+    弹几十上百次，用户只会看到"python 一直在要钥匙串权限"，而且每次都要点。
+    这是测试对开发者机器的真实副作用（与 ``_no_real_dsh_profile_write`` 同因），
+    也顺带让结果不再依赖"这台机器有没有钥匙串"。
+
+    需要验证 keyring 行为的用例自行 monkeypatch 覆盖本夹具（test_chat_subsystem /
+    test_config_domains / test_config_instance / test_config_key_migration 都是）。
+    """
+
+    class _InMemorySecretStore:
+        """接口与真实 SecretStore 一致（available / get / set）。"""
+
+        _values: dict[str, str] = {}
+
+        def __init__(self, service_name: str = "dsh-pet-standalone-test") -> None:
+            self.service_name = service_name
+
+        @property
+        def available(self) -> bool:
+            return True
+
+        def get(self, ref):
+            if not ref:
+                return ""
+            return self._values.get(f"{self.service_name}/{ref}", "")
+
+        def set(self, ref, value):
+            if not ref:
+                return False
+            self._values[f"{self.service_name}/{ref}"] = str(value)
+            return True
+
+    monkeypatch.setattr("pet.chat.models.SecretStore", _InMemorySecretStore)
+    try:
+        from pet.chat import settings_dialog as _settings_dialog
+    except Exception:
+        return
+    # 该模块在导入期就把 SecretStore 绑进了自己的命名空间，光换 models 里的不够。
+    monkeypatch.setattr(_settings_dialog, "SecretStore", _InMemorySecretStore)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_dsh_profile_write(monkeypatch):
     """禁止测试触发对**真实** ~/.dsh/profiles 的桥接 link 自检。
 
@@ -90,7 +161,7 @@ def _no_real_dsh_profile_write(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_dsh_homes(monkeypatch):
+def _isolate_dsh_homes(tmp_path, monkeypatch):
     """默认只让测试看见 monkeypatch 出来的 dsh home。
 
     ``agent_link.dsh_homes()`` 默认会把 ``~/.dsh`` 与托管启动器（Unsloth Studio
@@ -103,10 +174,26 @@ def _isolate_dsh_homes(monkeypatch):
     """
     try:
         from pet import agent_link
+        from pet import dsh_homes as dsh_homes_mod
     except Exception:
         return
     monkeypatch.setattr(agent_link, "_managed_dsh_homes", lambda: [])
     monkeypatch.setattr(agent_link, "_fallback_standard_home", lambda: None)
+    # dsh_homes 自己也要隔离：local_env 直接调它的 discover_managed_homes，
+    # 不经过 agent_link 那两个钩子。**只替换"默认值"这一档**——显式传 env 的
+    # 调用（用例在指定自己的假机器）仍走真实实现，否则 test_dsh_homes 里那些
+    # `discover_managed_homes({"UNSLOTH_AGENTS_DIR": ...})` 会被一起改掉。
+    real_unsloth_agents_dir = dsh_homes_mod.unsloth_agents_dir
+
+    def _no_default_unsloth(env=None):
+        # local_env 会把 os.environ 显式传进来（不是 None），所以判据是"有没有
+        # 显式指定 UNSLOTH_AGENTS_DIR"，而不是 env 是不是 None。
+        environ = os.environ if env is None else env
+        if str(environ.get(dsh_homes_mod.UNSLOTH_AGENTS_DIR_ENV) or "").strip():
+            return real_unsloth_agents_dir(environ)
+        return tmp_path / "no-such-unsloth-agents"
+
+    monkeypatch.setattr(dsh_homes_mod, "unsloth_agents_dir", _no_default_unsloth)
 
 
 @pytest.fixture(autouse=True)

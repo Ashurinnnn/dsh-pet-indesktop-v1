@@ -27,6 +27,7 @@ import time
 import webbrowser
 from pathlib import Path
 
+from . import local_env
 from .node_runtime import augmented_path as _augmented_path
 from .node_runtime import global_node_modules_roots
 from .node_runtime import static_node_modules_roots
@@ -48,16 +49,13 @@ def is_running(port: int = DEFAULT_PORT) -> bool:
 
 
 def _candidate_ports(port: int = DEFAULT_PORT) -> list[int]:
-    """复用已有实例的候选端口：配置端口优先，其次官方默认 3080。
+    """复用已有实例的候选端口：配置端口 → DSH_PORT → 官方 3080 → 自启动 38080。
 
-    用户可能已自行跑着一个 dsh web（比如官方默认 3080——3080 只是
-    Windows 上不宜**绑定**，作为客户端去连接没有问题）。先复用再新起，
-    避免用户机器上同时跑两个 dsh web 互相不认识。"""
-    ports: list[int] = []
-    for p in (int(port), 3080):
-        if p not in ports:
-            ports.append(p)
-    return ports
+    用户可能已自行跑着一个 dsh web——包括由托管启动器（如 Unsloth Studio）
+    拉起的那个。先复用再新起：机器上同时跑两个 home 不同、互不认识的 dsh，
+    对用户来说就是"两个界面、状态还是断的"。端口清单由 local_env 统一给出，
+    探测逻辑（dsh_state / 设置页）与这里保持同一份。"""
+    return local_env.dsh_service_ports(port)
 
 
 def _wrap_cmd(command: list[str]) -> list[str]:
@@ -321,7 +319,9 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> tu
     时会自己开浏览器，此参数无法阻止（启动前无法可靠探测）。
 
     返回 (status, url)：
-    - already   已有实例在运行（配置端口或官方默认 3080）；open_browser 时已打开浏览器
+    - already   已有实例在运行（配置端口 / DSH_PORT / 官方 3080 / 自启动 38080）；已开浏览器
+    - managed   本机 dsh 由托管启动器掌管（如 Unsloth Studio），桌宠不另起一个；
+                info 为启动器标识，由调用方提示用户去那边启动
     - started   已后台启动；open_browser 且命令带 --no-open 时由桌宠等待就绪后
                 打开浏览器，否则由 dsh 自己开浏览器（桌宠不重复打开）
     - not-found 未找到 dsh 命令
@@ -334,6 +334,13 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> tu
                 webbrowser.open(url)
             return "already", url
     url = f"http://127.0.0.1:{int(port)}"
+    # 托管启动器（如 Unsloth Studio）掌管 dsh 时**不自己起一个**：那会凭空多出
+    # 一个 home 不同、互不认识的实例（桌宠的桥接挂在另一个 home 上，状态也就断
+    # 了）。改为让用户去它自己的入口起——"自己适配"在这里就是"别抢别人的活"。
+    # 只有在确实没找到可复用实例时才这样让步。
+    owner = local_env.managed_dsh_owner()
+    if owner is not None:
+        return "managed", owner
     command = _find_launch_command(port)
     if command is None:
         return "not-found", url
@@ -384,6 +391,16 @@ def launch_harness_gui(parent=None) -> None:
                 bubble = getattr(parent, "show_bubble", None)
                 if callable(bubble):
                     bubble("正在后台启动 dsh web（首次运行需下载组件，可能要几分钟），就绪后会自动打开浏览器……", 6000)
+            return
+        if status == "managed":
+            owner_name = str(info or "").strip()
+            bubble = getattr(parent, "show_bubble", None)
+            if callable(bubble):
+                bubble(
+                    f"这台机器的 dsh 由 {owner_name or '托管启动器'} 拉起，"
+                    "桌宠不再另起一个——请从它的入口启动，不然会出现两个互不认识的实例。",
+                    7000,
+                )
             return
         if status == "not-found":
             QMessageBox.warning(

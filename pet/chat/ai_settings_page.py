@@ -443,6 +443,10 @@ class _AiSettingsPage(QWidget):
                 p.vision_api_key = vkey
                 QMessageBox.warning(self, "安全存储不可用", "无法使用系统安全存储，Key 仅本次运行保留，重启需重输。")
 
+    def _url_unchanged(self, provider) -> bool:
+        """表单里的 API 地址是否与已保存的一致（不一致时不许回退已存 Key）。"""
+        return self.url.text().strip() == str(provider.base_url or "").strip()
+
     def provisional_config(self):
         provider = self.settings.active_config
         return self._provider_config_type(
@@ -452,8 +456,14 @@ class _AiSettingsPage(QWidget):
             provider.chat_path,
             self.model.text().strip(),
             provider.api_key_ref,
-            # 表单未填时回退钥匙串：凭据默认存系统钥匙串，直接读 api_key 为空
-            self.key.text() or provider.api_key or self._secret_store_type().get(provider.api_key_ref),
+            # 表单未填时回退钥匙串：凭据默认存系统钥匙串，直接读 api_key 为空。
+            # 但**只在地址没被改动时**才回退：改一下 API 地址再点"测试连接"，
+            # 原服务商的 Key 就会被发到新主机去（审计 R3）。地址一变就只认表单里
+            # 现填的 Key，宁可提示"请先填 Key"也不把旧凭据发错地方。
+            self.key.text() or (
+                provider.api_key or self._secret_store_type().get(provider.api_key_ref)
+                if self._url_unchanged(provider) else ""
+            ),
             float(self.timeout.value()),
             float(self.temperature.value()),
             int(self.tokens.value()),
