@@ -26,6 +26,37 @@ key 的 provider，就会读真实钥匙串。每个 `python` 进程一次弹窗
 实测（见 §2）确认：**产品自身的启动路径一次都不碰钥匙串**，所以修好测试后不会再
 有这类弹窗；只有用户真正用聊天/识屏/余额时才会读一次（macOS 上点"始终允许"即可）。
 
+## 0b. 用户实测发现的第二个问题：空 API Key 连本地模型时反复弹钥匙串（已修）
+
+场景：在 设置 → AI 与对话 里把 API 地址指向本地部署（localhost / 自建网关），
+**API Key 留空**，结果每次用到凭据都弹一次系统授权框。
+
+这是**产品**路径的问题，与 §0 的测试问题无关，三条原因叠加：
+
+1. **输入框留空 ≠ 没有 Key**。凭据存在系统钥匙串里，留空只表示"不修改"
+   （`ai_settings_page._capture_current_draft`、`settings_dialog._key_status` 的
+   注释都写明"留空保持不变"）。于是每次解析凭据都会去读一次钥匙串，而
+   `resolve_api_key` 的调用点散布在**发送消息、余额查询、识屏、设置页状态**等
+   热路径上。
+2. **macOS 对未授权条目的每一次读取都弹一次授权框**，`SecretStore` 每次
+   `SecretStore()` 都新建实例、没有任何缓存——等于"每发一条消息弹一次"。
+3. **用户没有任何办法表达"这个服务不需要 Key"**：历史遗留的旧 Key 会一直被
+   翻出来（既弹窗，也会被当作 Bearer 发给本地端口）。
+
+修复（`tests/test_keychain_access_policy.py` 全覆盖）：
+
+| 改动 | 位置 |
+|---|---|
+| `SecretStore` 进程级缓存 + 新增 `delete()`（删除后留"已知为空"负缓存，不再回读） | `pet/chat/models.py` |
+| `ProviderConfig` 新增持久化的**非机密**标记 `api_key_required`（默认 True，老配置行为不变） | `pet/chat/models.py` |
+| `resolve_api_key`：标记为不需要 Key 时**直接返回空，绝不触碰钥匙串** | `pet/config.py` |
+| 明文迁移跳过"不需要 Key"的 provider（那也是一次钥匙串访问） | `pet/config.py` |
+| 两个设置界面各加一个「不需要 API Key（本地部署）」开关；勾选并保存会**真的删掉**钥匙串里那条陈旧凭据 | `pet/chat/ai_settings_page.py`、`pet/chat/settings_dialog.py` |
+| 旧对话框的 `_key_status` 不再读钥匙串（它过去**每次渲染**都读一次） | `pet/chat/settings_dialog.py` |
+
+效果：勾上开关后，该 provider 的凭据解析、连接测试、界面渲染**一次都不再访问
+系统钥匙串**；未勾选的既有用户也至少从"每次调用一次"降到"每进程一次"。
+
 ---
 
 ## 1. 凭证的存放与加载

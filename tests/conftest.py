@@ -132,6 +132,18 @@ def _fake_keyring(monkeypatch):
             self._values[f"{self.service_name}/{ref}"] = str(value)
             return True
 
+        def delete(self, ref):
+            if not ref:
+                return False
+            self._values.pop(f"{self.service_name}/{ref}", None)
+            return True
+
+    # 把真实实现挂到模块属性上，供"要验证真实 SecretStore 行为"的用例取回
+    # （tests/test_keychain_access_policy.py）。这是测试侧的摆放，产品文件不变。
+    import pet.chat.models as _chat_models
+
+    monkeypatch.setattr(_chat_models, "_REAL_SECRET_STORE_FOR_TESTS",
+                        _chat_models.SecretStore, raising=False)
     monkeypatch.setattr("pet.chat.models.SecretStore", _InMemorySecretStore)
     try:
         from pet.chat import settings_dialog as _settings_dialog

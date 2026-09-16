@@ -1018,6 +1018,9 @@ class Config:
         for provider_id, provider in providers.items():
             if not isinstance(provider, dict):
                 continue
+            if provider.get("api_key_required") is False:
+                # 该服务明确不需要 Key：迁移它只会白白访问一次钥匙串
+                continue
             for key_field, ref_field, default_ref in (
                 ("api_key", "api_key_ref", f"provider/{provider_id}"),
                 ("vision_api_key", "vision_api_key_ref", f"provider/{provider_id}/vision"),
@@ -1390,6 +1393,11 @@ class Config:
         return MenuConfig.from_dict(self.data)
 
     def resolve_api_key(self, provider):
+        # 明确标记"不需要 Key"的服务（本地部署）直接返回空：**绝不触碰系统钥匙串**。
+        # 否则每次发消息/查余额/识屏都会读一次，在 macOS 上就是反复弹授权框；
+        # 而且会把历史遗留的旧 Key 发给本地端口。
+        if not bool(getattr(provider, "api_key_required", True)):
+            return str(getattr(provider, "api_key", "") or "")
         from .chat.models import SecretStore
 
         return SecretStore().get(provider.api_key_ref) or provider.api_key

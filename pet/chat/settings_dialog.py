@@ -59,6 +59,8 @@ class ChatSettingsDialog(QDialog):
         self.url = QLineEdit(p.base_url)
         self.model = QLineEdit(p.model)
         self.key = QLineEdit()
+        # 本地部署不需要凭据：勾上后不再读取系统钥匙串（详见 ai_settings_page 同名开关）
+        self.key_not_required = QCheckBox("该服务不需要 API Key（本地部署）")
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText('留空表示不修改已保存的 Key')
         self.key_hint = QLabel(self._key_status(p))
@@ -79,6 +81,8 @@ class ChatSettingsDialog(QDialog):
         # 视觉模型（看看屏幕）：默认同聊天模型推导；取消勾选可手填（如免费 glm-4.6v-flash）
         self.vmodel = QLineEdit(p.vision_model)
         self.vmodel.setPlaceholderText('留空自动推导；免费视觉可用智谱 glm-4.6v-flash')
+        self.key_not_required.toggled.connect(
+            lambda on: (self.key.setEnabled(not on), self.key.clear() if on else None))
         self.vsame = QCheckBox('视觉模型同聊天模型（ds 文本模型自动换 vision-exp；GLM/Kimi 等多模态直接复用）')
         self.vsame.setChecked(p.vision_same_as_chat)
         self.vurl = QLineEdit(p.vision_base_url)
@@ -125,7 +129,7 @@ class ChatSettingsDialog(QDialog):
         form.insertRow(0, 'API 列表', provider_row)
         for label, w in [('Provider 名称', self.name), ('API 地址', self.url),
                          ('模型', self.model), ('', self.vsame), ('视觉模型', self.vmodel), ('视觉 API 地址', self.vurl), ('视觉 API Key', self.vkey),
-                         ('API Key', self.key), ('', self.key_hint),
+                         ('API Key', self.key), ('', self.key_not_required), ('', self.key_hint),
                          ('系统通知', self.system_notify_check),
                          ('System Prompt', self.prompt),
                          ('聊天背景', bgmode_row), ('', bg_row),
@@ -175,6 +179,7 @@ class ChatSettingsDialog(QDialog):
             # 输入框为空表示“不修改/不覆盖”，保留草稿里已录入但尚未保存的 Key；
             # 否则 _load_provider_ui() 清空输入框后会把草稿 Key 覆盖成空。
             'key': key_text if key_text else existing.get('key', ''),
+            'api_key_required': not self.key_not_required.isChecked(),
             'timeout': float(self.timeout.value()),
             'temperature': float(self.temp.value()),
             'max_tokens': int(self.tokens.value()),
@@ -195,6 +200,8 @@ class ChatSettingsDialog(QDialog):
         self.url.setText(draft.get('base_url') if draft.get('base_url') is not None else p.base_url)
         self.model.setText(draft.get('model') if draft.get('model') is not None else p.model)
         self.key.clear()
+        self.key_not_required.setChecked(not bool(draft.get('api_key_required', p.api_key_required)))
+        self.key.setEnabled(not self.key_not_required.isChecked())
         self.key_hint.setText(self._key_status(p))
         self.timeout.setValue(int(draft.get('timeout', p.timeout)))
         self.temp.setValue(float(draft.get('temperature', p.temperature)))
@@ -326,10 +333,19 @@ class ChatSettingsDialog(QDialog):
     @staticmethod
     def _key_status(p) -> str:
         """当前是否已保存 API Key（提示用户留空不修改，无需每次重输）。"""
-        saved = p.api_key or SecretStore().get(p.api_key_ref)
-        if saved:
+        # 状态提示**不读系统钥匙串**：那会在每次打开设置/切换 Provider 时触发一次
+        # macOS 授权弹窗。这里只看非机密信息（内存里的明文 / 明确的"不需要 Key"标记）。
+        if not bool(getattr(p, 'api_key_required', True)):
+            return '该服务已标记为不需要 API Key（不会读取系统钥匙串）'
+        if p.api_key:
             return '已保存 API Key（留空保持不变，修改 System Prompt 无需重输）'
+        if p.api_key_ref:
+            return 'API Key 保存在系统钥匙串（留空保持不变；清空请勾选上方"不需要 API Key"）'
         return '尚未设置 API Key（填入后保存即生效）'
+
+    def _draft_key_required(self, p) -> bool:
+        draft = self._provider_drafts.get(p.provider_id) or {}
+        return bool(draft.get('api_key_required', p.api_key_required))
 
     def _provisional_config(self) -> ProviderConfig:
         """用表单当前值构造一份临时配置（不保存），供测试连接使用。"""
@@ -342,7 +358,9 @@ class ChatSettingsDialog(QDialog):
             self.model.text().strip(),
             p.api_key_ref,
             # 表单未填时回退钥匙串：凭据默认存系统钥匙串，直接读 api_key 为空
-            self.key.text() or p.api_key or SecretStore().get(p.api_key_ref),
+            self.key.text() or p.api_key or (
+                '' if not self._draft_key_required(p) else SecretStore().get(p.api_key_ref)
+            ),
             float(self.timeout.value()),
             float(self.temp.value()),
             int(self.tokens.value()),
@@ -391,8 +409,14 @@ class ChatSettingsDialog(QDialog):
         p.vision_same_as_chat = bool(draft.get('vision_same_as_chat', p.vision_same_as_chat))
         p.vision_base_url = draft.get('vision_base_url', p.vision_base_url)
         p.verify_ssl = bool(draft.get('verify_ssl', p.verify_ssl))
+        p.api_key_required = bool(draft.get('api_key_required', p.api_key_required))
         key = str(draft.get('key') or '')
-        if key:
+        if not p.api_key_required:
+            # 明确不要 Key：把钥匙串里那条删干净（见 ai_settings_page 同处注释）
+            if p.api_key_ref:
+                SecretStore().delete(p.api_key_ref)
+            p.api_key = ''
+        elif key:
             p.api_key_ref = p.api_key_ref or f'provider/{provider_id}'
             if not SecretStore().set(p.api_key_ref, key):
                 p.api_key = key

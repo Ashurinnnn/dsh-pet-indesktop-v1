@@ -147,6 +147,11 @@ class FakeWin:
 def _make_body(tmp_path: Path, pets=()):
     cfg = Config(base=tmp_path)
     cfg.set("dynamic_island", {"enabled": True, "x": 400, "y": 300})
+    # 岛宽包含角色显示名的像素宽度，而下面这些用例的坐标（体育场轴 [422,634] 等）
+    # 是照 "shenshen" 这个宽度算出来的。把显示名钉死，让碰撞几何与"角色能不能改名"
+    # 这个功能解耦——否则换个名字就会静默改变用例的物理场景，红得莫名其妙。
+    # 走公开的 character_aliases（alias 优先于内置显示名），不打产品代码私有方法。
+    cfg.set("character_aliases", {"shenshen": "shenshen"})
     island = DynamicIsland(cfg)
     body = IslandCollisionBody(island, cfg, pets_provider=lambda: list(pets))
     return island, body

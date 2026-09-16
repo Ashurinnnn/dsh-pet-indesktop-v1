@@ -67,6 +67,11 @@ class _AiSettingsPage(QWidget):
         self.url = _line_edit(provider.base_url)
         self.model = _line_edit(provider.model)
         self.key = _line_edit(password=True)
+        # 本地部署（localhost / 自建网关）不需要凭据。勾上就**不再读系统钥匙串**：
+        # macOS 上每次未授权的读取都会弹一次授权框，而发送消息/查余额/识屏都会走
+        # 解析凭据这条路——留空输入框并不等于"没有 Key"（钥匙串里可能还有旧的），
+        # 所以必须给用户一个能明确表达"这个服务不需要 Key"的开关。
+        self.key_not_required = ToggleSwitch(self)
         self.prompt = QPlainTextEdit(self.settings.default_system_prompt)
         self.prompt.setMinimumSize(240, 80)
         self.timeout = BrowserSpinBox()
@@ -154,6 +159,12 @@ class _AiSettingsPage(QWidget):
             SettingRow("provider_name", "Provider 名称", "用于区分当前使用的模型服务。", self.name),
             SettingRow("api_url", "API 地址", "OpenAI Chat Completions 兼容服务地址。", self.url),
             SettingRow("model", "模型", "发送请求时使用的模型标识。", self.model),
+            SettingRow(
+                "api_key_not_required", "不需要 API Key",
+                "本地部署（localhost / 自建网关）勾选此项：桌宠不会再读取系统钥匙串，"
+                "也不会把历史保存的旧 Key 发给该地址。",
+                self.key_not_required,
+            ),
             SettingRow("api_key", "API Key", "凭据优先保存到系统钥匙串。", self.key),
             SettingRow("system_prompt", "System Prompt", "定义桌宠对话时的身份、语气和行为。", self.prompt, stacked=True),
             SettingRow("connection_test", "连接测试", self.test_result.text(), self.test_button),
@@ -184,6 +195,7 @@ class _AiSettingsPage(QWidget):
             SettingRow("max_tokens", "最大输出 Token", "限制模型单次回复的最大长度。", self.tokens),
             SettingRow("skip_ssl", "跳过 SSL 证书验证", "仅用于本地网关或自签名证书。", self.skip_ssl),
         ], self, advanced=True))
+        self.key_not_required.toggled.connect(lambda _=False: self._sync_key_field_enabled())
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         self.add_provider_btn.clicked.connect(self._add_provider)
         self.delete_provider_btn.clicked.connect(self._delete_provider)
@@ -299,6 +311,7 @@ class _AiSettingsPage(QWidget):
             # 输入框为空表示“不修改/不覆盖”，保留草稿里已录入但尚未保存的 Key；
             # 否则 _load_provider_ui() 清空输入框后会把草稿 Key 覆盖成空。
             "key": key_text if key_text else existing.get("key", ""),
+            "api_key_required": not self.key_not_required.isChecked(),
             "timeout": float(self.timeout.value()),
             "temperature": float(self.temperature.value()),
             "max_tokens": int(self.tokens.value()),
@@ -308,6 +321,13 @@ class _AiSettingsPage(QWidget):
             "vision_key": vkey_text if vkey_text else existing.get("vision_key", ""),
             "verify_ssl": not self.skip_ssl.isChecked(),
         }
+
+    def _sync_key_field_enabled(self) -> None:
+        """不需要 Key 时把输入框置灰（避免"填了却不生效"的困惑）。"""
+        needs = not self.key_not_required.isChecked()
+        self.key.setEnabled(needs)
+        if not needs:
+            self.key.clear()
 
     def _load_provider_ui(self, provider_id: str) -> None:
         p = self.settings.providers.get(provider_id)
@@ -319,6 +339,9 @@ class _AiSettingsPage(QWidget):
         self.url.setText(draft.get("base_url") if draft.get("base_url") is not None else p.base_url)
         self.model.setText(draft.get("model") if draft.get("model") is not None else p.model)
         self.key.clear()
+        self.key_not_required.setChecked(
+            not bool(draft.get("api_key_required", p.api_key_required)))
+        self._sync_key_field_enabled()
         self.timeout.setValue(int(draft.get("timeout", p.timeout)))
         self.temperature.setValue(float(draft.get("temperature", p.temperature)))
         self.tokens.setValue(int(draft.get("max_tokens", p.max_tokens)))
@@ -430,8 +453,15 @@ class _AiSettingsPage(QWidget):
         p.vision_same_as_chat = bool(draft.get("vision_same_as_chat", p.vision_same_as_chat))
         p.vision_base_url = draft.get("vision_base_url", p.vision_base_url)
         p.verify_ssl = bool(draft.get("verify_ssl", p.verify_ssl))
+        p.api_key_required = bool(draft.get("api_key_required", p.api_key_required))
         key = str(draft.get("key") or "")
-        if key:
+        if not p.api_key_required:
+            # 明确不要 Key：真的把钥匙串里那条删掉，别留个陈旧凭据被下次请求翻出来
+            # 发到本地端口（也免得它一直触发 macOS 授权框）。
+            if p.api_key_ref:
+                self._secret_store_type().delete(p.api_key_ref)
+            p.api_key = ""
+        elif key:
             p.api_key_ref = p.api_key_ref or f"provider/{provider_id}"
             if not self._secret_store_type().set(p.api_key_ref, key):
                 p.api_key = key
@@ -449,6 +479,7 @@ class _AiSettingsPage(QWidget):
 
     def provisional_config(self):
         provider = self.settings.active_config
+        draft_required = not self.key_not_required.isChecked()
         return self._provider_config_type(
             provider.provider_id,
             self.name.text().strip() or provider.name,
@@ -461,7 +492,11 @@ class _AiSettingsPage(QWidget):
             # 原服务商的 Key 就会被发到新主机去（审计 R3）。地址一变就只认表单里
             # 现填的 Key，宁可提示"请先填 Key"也不把旧凭据发错地方。
             self.key.text() or (
-                provider.api_key or self._secret_store_type().get(provider.api_key_ref)
+                provider.api_key or (
+                    # 明确不需要 Key 的服务一次都不许读钥匙串（本地部署的常态）
+                    "" if not bool(draft_required) else
+                    self._secret_store_type().get(provider.api_key_ref)
+                )
                 if self._url_unchanged(provider) else ""
             ),
             float(self.timeout.value()),
