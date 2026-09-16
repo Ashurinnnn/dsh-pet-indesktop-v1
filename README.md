@@ -8,7 +8,7 @@
 </p>
 
 这是基于[MerZlin/dsh-pet-indesktop](https://github.com/MerZlin/dsh-pet-indesktop) 的**个人 fork**，
-只针对我自己的使用环境做改造：**macOS（Apple Silicon）**。
+只针对我自己的使用环境进行修改：**macOS（Apple Silicon）**。
 
 上游是一个基于 **Python + PySide6** 的独立桌面宠物（透明无边框、置顶、可拖动、动画播放、
 系统托盘、可选 AI 对话与本地 agent 联动）。上游的完整文档保留在
