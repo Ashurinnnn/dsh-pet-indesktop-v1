@@ -64,9 +64,15 @@ def main() -> int:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src_bridge = os.path.join(root, "integrations", "dsh-pet-bridge")
 
-    dst_bridge = find_dist_bridge(args.app_dir)
+    # 先把 --app-dir 归一化成绝对路径。**这不是洁癖**：下面的零依赖冒烟会用
+    # `cwd=dst_bridge` 调 node，而 node 会把相对脚本路径**相对新的 cwd** 再解析
+    # 一次——`--dist dist`（CI 与 build_macos.sh 都这么传）于是拼出
+    # `.../dsh-pet-bridge/dist/.../verify_import.mjs` 这种双重路径，冒烟必然
+    # MODULE_NOT_FOUND，把构建误判成"桥接违反零依赖红线"。
+    app_dir = os.path.abspath(args.app_dir)
+    dst_bridge = find_dist_bridge(app_dir)
     if dst_bridge is None:
-        print(f"[bridge] dist bridge missing under: {args.app_dir}", file=sys.stderr)
+        print(f"[bridge] dist bridge missing under: {app_dir}", file=sys.stderr)
         return 1
 
     # 防线 0（不依赖 node，Linux/macOS 构建路径没有别的清单校验）：dist 副本的
