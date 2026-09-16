@@ -41,6 +41,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "character",
         "character_aliases",
         "character_profiles",
+        # 桌宠对用户的称呼（内置文案里的 {user} 占位符）
+        "user_address",
         "chat_always_on_top",
         "chat_background",
         "chat_background_fill",

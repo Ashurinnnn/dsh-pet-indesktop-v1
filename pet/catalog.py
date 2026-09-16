@@ -58,6 +58,13 @@ SCALE_STEPS = (0.5, 0.72, 0.85, 1.0)
 # 当前内置形象与未来扩展形象 ID（目录名建议使用稳定 ASCII）
 DEFAULT_CHARACTER = 'shenshen'
 CHARACTERS = ('shenshen',)
+# 内置形象的显示名。角色 id 是目录名与配置值，必须保持稳定 ASCII；**展示给用户
+# 的一律走 character_display_name()**，别把 id 直接显示出来——缺失 manifest.json
+# 的形象过去会在界面/气泡里露出一串 ASCII 的 "shenshen"。
+# 用户想改叫法时用 config 的 character_aliases（设置页「称呼与名字」）。
+BUILTIN_CHARACTER_NAMES = {
+    'shenshen': '深深',
+}
 MANIFEST_FILENAME = 'manifest.json'
 # videos 下的分类子目录
 DIR_IDLE = 'idle'
@@ -267,13 +274,18 @@ def load_character_manifest(character_id: str, asset_dir: Path | str | None = No
 
 
 def character_display_name(character_id: str) -> str:
-    """角色显示名：manifest.json 的 name 字段优先，缺省回退目录 id。"""
-    manifest = load_character_manifest(character_id)
+    """角色显示名：manifest.json 的 name → 内置显示名 → 目录 id。
+
+    回退链的最后一档才是目录 id，且只在"用户自己放进来的、既没 manifest 又
+    没内置名的形象"上才走到——内置的 shenshen 显示为「深深」。
+    """
+    cid = str(character_id)
+    manifest = load_character_manifest(cid)
     if isinstance(manifest, dict):
         name = str(manifest.get('name', '') or '').strip()
         if name:
             return name
-    return character_id
+    return BUILTIN_CHARACTER_NAMES.get(cid, cid)
 
 
 def _manifest_name(value, names: set[str]) -> str | None:

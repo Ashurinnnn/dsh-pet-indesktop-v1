@@ -35,6 +35,7 @@ from .session_store import SessionStore
 from .utils import _short_title
 from ..context_menus.icons import vector_widget_icon
 from . import themes as chat_themes
+from .. import catalog
 
 
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -287,7 +288,7 @@ class ChatWindow(QDialog):
         self._bg_value = ""
         self._bg_scaled = None
         self._bg_scaled_size = None
-        self.character_name = self.character_id
+        self.character_name = catalog.character_display_name(self.character_id)
         self._character_manifest: dict = {}
         self.follow_pet = bool(config.get("chat_follow_pet", False))
         self._follow_pet_window = None
@@ -675,7 +676,10 @@ class ChatWindow(QDialog):
         self._character_manifest = load_character_manifest(root, self.character_id)
         chat = self._character_manifest.get("chat", {})
         chat = chat if isinstance(chat, dict) else {}
-        self.character_name = str(self._character_manifest.get("name") or chat.get("name") or self.character_id)
+        self.character_name = str(
+            self._character_manifest.get("name") or chat.get("name")
+            or catalog.character_display_name(self.character_id)
+        )
         self.accent_color = _safe_color(chat.get("theme_color"))
         self._base_accent = self.accent_color
         self.title_label.setText(f"{self.character_name} · AI 对话")

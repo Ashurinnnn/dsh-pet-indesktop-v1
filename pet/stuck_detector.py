@@ -20,6 +20,8 @@ from functools import lru_cache
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from . import user_address
+
 log = logging.getLogger("dsh-pet-standalone")
 
 # ---------------------------------------------------------------------------
@@ -63,7 +65,7 @@ WORRIED_KEYWORDS = ("焦急", "着急", "气急败坏", "抓狂", "拍打", "敲
 
 # 默认提醒文案
 DEFAULT_STUCK_REMINDER = (
-    "主人，{name} 好像卡在环境/网络问题上转圈圈了…… 人工介入可能更快哦。"
+    "{user}，{name} 好像卡在环境/网络问题上转圈圈了…… 人工介入可能更快哦。"
 )
 
 # 干预原因代码
@@ -526,5 +528,6 @@ class StuckDetector(QObject):
 def stuck_reminder_text(agent_name: str, custom_text: str = "") -> str:
     """生成卡住建议介入文案。"""
     if custom_text:
-        return custom_text.replace("{name}", agent_name)
-    return DEFAULT_STUCK_REMINDER.replace("{name}", agent_name)
+        return user_address.fill(custom_text).replace("{name}", agent_name)
+    # 称呼占位符先填（用户可自定义），再填 Agent 名。
+    return user_address.fill(DEFAULT_STUCK_REMINDER).replace("{name}", agent_name)

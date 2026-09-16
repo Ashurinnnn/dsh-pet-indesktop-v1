@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from . import user_address
 
 # 注意：不在此处顶层 import PIL —— Image/ImageGrab 只在截屏路径
 # （capture_window_rect / capture_screen_bytes）用到，而本模块随 pet.window
@@ -324,9 +325,10 @@ def _post_vision_request(
     endpoint = normalize_chat_endpoint(base_url, p.chat_path)
     b64 = base64.b64encode(jpeg_bytes).decode('ascii')
     note = app_info or '（拿不到前台窗口信息）'
+    address = user_address.current()
     user_text = (
-        f'（参考元数据：主人当前前台应用为 {note}）\n'
-        '这是主人当前的屏幕截图。用你的人设口吻回应一两句就好'
+        f'（参考元数据：{address}当前前台应用为 {note}）\n'
+        f'这是{address}当前的屏幕截图。用你的人设口吻回应一两句就好'
         '（关心、吐槽、好奇都可以）。请主要根据画面里正在发生的事情来回应；'
         '窗口标题只是参考信息，不要逐字念出，更不要只围绕标题发挥；'
         '也不要把画面内容逐条罗列出来。'
@@ -338,7 +340,7 @@ def _post_vision_request(
     name_part = f'「{pet_name}」' if pet_name else ''
     user_text += (
         '\n（身份提示：画面边缘或角落里如果有一个动漫风格的桌面宠物形象，'
-        f'那就是你自己{name_part}——你在主人桌面上的化身。请以第一人称自然看待它'
+        f'那就是你自己{name_part}——你在{address}桌面上的化身。请以第一人称自然看待它'
         '（比如"我在你桌面上呢"），不要说成陌生软件或与己无关的角色。）'
     )
     payload = {

@@ -801,6 +801,8 @@ class ModernSettingsDialog(QDialog):
                 appearance_content,
             )
         )
+        appearance_layout.addWidget(SettingsSection(
+            "称呼与名字", settings_pet_controls.identity_rows(self), appearance_content))
         appearance_layout.addWidget(
             SettingsSection(
                 "菜单外观",
@@ -2031,6 +2033,7 @@ class ModernSettingsDialog(QDialog):
         minimum = min(self.min_spin.value(), self.max_spin.value())
         maximum = max(self.min_spin.value(), self.max_spin.value())
         texts = [line.strip()[:120] for line in self.texts_edit.toPlainText().splitlines() if line.strip()]
+        settings_pet_controls.save_identity_settings(self)
         self.config.set("scale", float(self.scale_combo.currentData()))
         self.config.set("spawn_inherit_size", self.spawn_inherit_size_check.isChecked())
         self.config.set("spawn_scale", float(self.spawn_scale_combo.currentData()))

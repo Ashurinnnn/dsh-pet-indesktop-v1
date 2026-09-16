@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from . import catalog
+from . import user_address
+from .agent_registry import BUILTIN_AGENT_KEYS as _AGENT_LINK_BUILTIN_KEYS
 from .report_gates import (
     LEGACY_PERCENT_GATES,
     LEGACY_SWITCH_GATES,
@@ -201,10 +203,9 @@ def _default_proactive_screen_data() -> dict:
 
 def _default_agent_link_data() -> dict:
     return {
-        "dsh": False,
-        "claude": False,
-        "cursor": False,
-        "opencode": False,
+        # 内置 Agent 开关默认全关；键清单见 pet/agent_registry.py（新增内置
+        # Agent 不必回到这里补一行）。
+        **{key: False for key in _AGENT_LINK_BUILTIN_KEYS},
         # 自定义联动 Agent（协议见 docs/AGENT_LINK_PROTOCOL.md §4）：只读监听
         # 用户指定的事件文件，不写外部配置、无需授权弹窗，默认空
         "custom_agents": [],
@@ -278,7 +279,6 @@ def _clean_click_sound_pack(value: Any) -> dict:
 
 
 # 内置联动 Agent 键：custom_agents 的 key 不得与之重复
-_AGENT_LINK_BUILTIN_KEYS = ("dsh", "claude", "cursor", "opencode")
 # 自定义联动 Agent 条目上限（防配置文件被塞爆）
 _CUSTOM_AGENT_MAX = 8
 
@@ -321,10 +321,7 @@ def _clean_agent_link_data(raw: Any) -> dict:
     result.update(raw)
     result["custom_agents"] = _clean_custom_agents(raw.get("custom_agents"))
     for key in (
-        "dsh",
-        "claude",
-        "cursor",
-        "opencode",
+        *_AGENT_LINK_BUILTIN_KEYS,
         "sound_enabled",
         "sound_start_enabled",
         "sound_done_enabled",
@@ -684,6 +681,9 @@ class Config:
             "modern_chat_card_opacity": 84,
             "chat_bg_crops": {},  # 每个背景的用户自定义取景框 {背景标识: [x,y,w,h] 归一化}
             "character_aliases": {},  # 角色显示名别名 {角色id: 自定义名}，空名=恢复默认
+            # 桌宠对用户的称呼（内置文案里的 {user} 占位符）。空=恢复默认「主人」；
+            # 用户想让它叫自己名字/昵称时改这里（设置页「称呼与名字」）。
+            "user_address": user_address.DEFAULT_ADDRESS,
             "character_profiles": {},  # 角色档案：{角色id: {click_talk_bindings: {动画id: [台词]}}}
             "chat_always_on_top": False,  # 聊天窗置顶
             "dynamic_island": _default_dynamic_island_data(),
@@ -746,6 +746,9 @@ class Config:
         }
         self.reload()
         self._normalize_pet_settings()
+        # 渲染层（模板/歌词/菜单/识屏）读的是 user_address 模块里的进程级当前值，
+        # 这里同步一次，保证配置一加载就生效。
+        user_address.set_address(self.data.get("user_address"))
 
     def _migrate_legacy_config(self, base) -> None:
         """旧版各变体共用 %APPDATA%/dsh-pet-standalone；升级后首次运行时
@@ -958,6 +961,7 @@ class Config:
             "festival_custom_quotes_cn",
             "festival_custom_quotes_west",
             "character_aliases",
+            "user_address",
             "character_profiles",
             "chat_always_on_top",
             "dynamic_island",
@@ -1304,6 +1308,10 @@ class Config:
         self.save()
 
     def set(self, key, value):
+        if key == "user_address":
+            # 称呼会立刻影响台词渲染，所以在这里就清洗并同步，不等 save()。
+            value = user_address.clean_address(value)
+            user_address.set_address(value)
         self.data[key] = value
         if key in {
             "playback_speed",

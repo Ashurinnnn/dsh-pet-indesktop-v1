@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from . import autostart as autostart_mod
 from . import catalog
+from . import user_address
 from .agent_link import AgentLinkManager
 from .music_lyric_controller import (
     LEAD_MAX_SECONDS,
@@ -61,6 +62,20 @@ from .speech_bubble import BUBBLE_STYLE_PRESETS
 
 def build_pet_controls(host) -> None:
     from .modern_settings_dialog import dialogue_params_hint
+    # 称呼与名字：桌宠自己叫什么（角色显示名别名）+ 它怎么称呼用户（台词里的
+    # {user}）。两者都留空即恢复内置默认，所以输入框用 placeholder 展示默认值，
+    # 而不是把默认值填进去让用户以为"已经改过"。
+    current_character = str(host.config.get("character", catalog.DEFAULT_CHARACTER))
+    host.pet_name_edit = QLineEdit(host)
+    host.pet_name_edit.setMaxLength(24)
+    host.pet_name_edit.setMinimumWidth(180)
+    host.pet_name_edit.setPlaceholderText(catalog.character_display_name(current_character))
+    host.pet_name_edit.setText(host.config.character_alias(current_character))
+    host.user_address_edit = QLineEdit(host)
+    host.user_address_edit.setMaxLength(user_address.MAX_LENGTH)
+    host.user_address_edit.setMinimumWidth(180)
+    host.user_address_edit.setPlaceholderText(user_address.DEFAULT_ADDRESS)
+    host.user_address_edit.setText(str(host.config.get("user_address", "") or ""))
     host.scale_combo = ModernSelect(host, width=132)
     current_scale = float(host.config.get("scale", catalog.DEFAULT_SCALE))
     scales = list(catalog.SCALE_STEPS)
@@ -543,6 +558,47 @@ def build_pet_controls(host) -> None:
 
 
 # ------------------------------------------------------------ 灵动岛联动控制器
+
+
+def save_identity_settings(host) -> None:
+    """保存「称呼与名字」：角色显示名别名（空=恢复内置名）+ 对用户的称呼。
+
+    在 Config.reload() 之后调用，只改这两个键，不覆盖用户其它改动。
+    """
+    character_id = str(host.config.get("character", catalog.DEFAULT_CHARACTER))
+    aliases = dict(host.config.get("character_aliases") or {})
+    typed_name = host.pet_name_edit.text().strip()[:24]
+    if typed_name:
+        aliases[character_id] = typed_name
+    else:
+        aliases.pop(character_id, None)
+    host.config.set("character_aliases", aliases)
+    host.config.set("user_address", host.user_address_edit.text())
+
+
+def identity_rows(host) -> list:
+    """「称呼与名字」设置行（外观页用）。
+
+    行定义放在这里而不是 modern_settings_dialog：那个文件有行数预算（防膨胀绊线），
+    控件组的归属本来就该跟着 pet 控制这一族走。
+    """
+    from .settings_widgets import SettingRow
+
+    return [
+        SettingRow(
+            "pet_name",
+            "桌宠的名字",
+            "显示在标题、灵动岛、聊天窗口与气泡里的名字；留空恢复内置名。",
+            host.pet_name_edit,
+        ),
+        SettingRow(
+            "user_address",
+            "它怎么称呼你",
+            "台词里对用户的称呼；留空恢复「" + user_address.DEFAULT_ADDRESS + "」。"
+            "自定义文案里也可以用 {user} 占位符。",
+            host.user_address_edit,
+        ),
+    ]
 
 
 def _update_island_controls(host, enabled: bool) -> None:

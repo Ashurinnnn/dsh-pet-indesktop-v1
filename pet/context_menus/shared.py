@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QMenu
 
 from .. import autostart as autostart_mod
 from .. import catalog
+from .. import user_address
 from ..harness_launcher import launch_harness_gui
 from ..report_gates import REPORT_GATE_DEFAULTS
 from ..updater import QUARK_PAN_URL, REPO_URL
@@ -612,7 +613,7 @@ def add_music_pause(menu: QMenu, pet, *, icons: bool = True):
 def add_music_next(menu: QMenu, pet, *, icons: bool = True):
     """音乐子菜单：切歌。"""
     return add_action(
-        menu, "给主人换一首（切歌）", "play" if icons else None,
+        menu, f"给{user_address.current()}换一首（切歌）", "play" if icons else None,
         lambda: _skip_track(pet, "next"), close_on_trigger=True,
     )
 
@@ -639,7 +640,7 @@ def _music_player_builder(player_key: str):
             manual = str(paths_cfg.get(player_key, "") or "")
         found = music_players.find_player(player_key, manual)
         action = add_action(
-            menu, f"打开{label}给主人放歌", None,
+            menu, f"打开{label}给{user_address.current()}放歌", None,
             (lambda: _launch_player_and_play(player_key, pet)) if found else None,
             close_on_trigger=True,
         )

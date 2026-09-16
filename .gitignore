@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .DS_Store
+# 本地开发虚拟环境（构建脚本要求有 PySide6，见 docs/ONEDIR_PACKAGING.md）。
+# venv 自己会写一个 .venv/.gitignore，但那条规则随目录一起丢，这里显式兜住。
+.venv/
 
 # 运行时产物
 tmp_appdata/

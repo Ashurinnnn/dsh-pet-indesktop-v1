@@ -40,7 +40,9 @@ class WindowFeatureGateMixin:
         raw = self.cfg.get("agent_link", {})
         if not isinstance(raw, dict):
             return False
-        for key in ("dsh", "claude", "cursor", "opencode"):
+        from .agent_registry import BUILTIN_AGENT_KEYS
+
+        for key in BUILTIN_AGENT_KEYS:
             if bool(raw.get(key, False)):
                 return True
         return bool(raw.get("custom_agents"))

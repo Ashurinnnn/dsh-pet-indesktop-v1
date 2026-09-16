@@ -117,7 +117,12 @@ WINDOW_PY_LINE_BUDGET = 4507
 # 这正是「红线是组合性质」：两个 PR 各自合并时 CI 都绿，合到一起才越线
 # （见 docs/PR-MERGE-LESSONS-2026-09-12.md 教训 2）。按文件约定只随实测校准，
 # 不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2311
+# 2026-09-16 上调到 2314：新增「称呼与名字」设置组（桌宠名字 + 对用户的称呼）。
+# 行定义与保存逻辑都已拆到 pet/settings_pet_controls.py（identity_rows /
+# save_identity_settings），这里只剩"挂一节 + 调一次保存"的接线（+3 行），
+# 再拆就是把 SettingsSection 的接线也搬走，得不偿失。按文件约定只随实测校准，
+# 不为达标压缩行宽/合并语句；拆分仍是待办。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2314
 
 
 

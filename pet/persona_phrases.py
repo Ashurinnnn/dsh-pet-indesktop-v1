@@ -18,6 +18,8 @@ from string import Formatter
 from typing import Any, Mapping
 import re
 
+from . import user_address
+
 class _TemplateObject(dict):
     """Mapping that supports both ``field.key`` and ``field[key]`` syntax."""
     def __getattr__(self, key: str) -> Any:
@@ -50,6 +52,9 @@ def _template_values(values: Mapping[str, Any]) -> dict[str, Any]:
             result.setdefault(str(key), value)
         result.setdefault("payload", payload)
         result.setdefault("data", payload)
+    # 桌宠对用户的称呼：所有走模板的文案都能用 {user}，不必每条调用链都传。
+    # 上游事件若真的带了 user 字段，以它为优先（setdefault 语义）。
+    result.setdefault("user", user_address.current())
     return {str(key): _wrap_template_value(value) for key, value in result.items()}
 
 
@@ -248,7 +253,11 @@ class PhrasePicker:
         """
         variants = builtin_phrases(mode).get(key)
         if not variants:
-            return fallback
+            # 兜底文案只替换称呼，**不做整串渲染**：既有契约是"未命中 → 返回
+            # fallback 原文，由调用方格式化"（见 test_persona_presets 的回归
+            # 用例）。但内置兜底串上写着 {user}，原样返回会把 "{user}" 直接
+            # 显示给用户，所以称呼这一项必须在这里落地。
+            return user_address.fill(fallback)
         if isinstance(variants, str):
             variants = [variants]
         last = self._last[key]
@@ -269,13 +278,17 @@ class PhrasePicker:
         """
         raw = phrase_for_agent(custom_phrases, "", key)
         if raw is None:
-            return fallback
+            return user_address.fill(fallback)
         if isinstance(raw, list):
             variants = [str(item).strip() for item in raw if isinstance(item, str) and item.strip()]
         else:
             variants = [str(raw).strip()] if isinstance(raw, str) and raw.strip() else []
         if not variants:
-            return fallback
+            # 兜底文案只替换称呼，**不做整串渲染**：既有契约是"未命中 → 返回
+            # fallback 原文，由调用方格式化"（见 test_persona_presets 的回归
+            # 用例）。但内置兜底串上写着 {user}，原样返回会把 "{user}" 直接
+            # 显示给用户，所以称呼这一项必须在这里落地。
+            return user_address.fill(fallback)
         last = self._last[key]
         index = (last + 1) % len(variants)
         self._last[key] = index
@@ -293,13 +306,17 @@ class PhrasePicker:
         """
         raw = phrase_for_agent(phrases, route_agent, key)
         if raw is None:
-            return fallback
+            return user_address.fill(fallback)
         if isinstance(raw, list):
             variants = [str(item).strip() for item in raw if isinstance(item, str) and item.strip()]
         else:
             variants = [str(raw).strip()] if isinstance(raw, str) and raw.strip() else []
         if not variants:
-            return fallback
+            # 兜底文案只替换称呼，**不做整串渲染**：既有契约是"未命中 → 返回
+            # fallback 原文，由调用方格式化"（见 test_persona_presets 的回归
+            # 用例）。但内置兜底串上写着 {user}，原样返回会把 "{user}" 直接
+            # 显示给用户，所以称呼这一项必须在这里落地。
+            return user_address.fill(fallback)
         last = self._last[key]
         index = (last + 1) % len(variants)
         self._last[key] = index

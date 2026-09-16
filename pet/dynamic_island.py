@@ -674,7 +674,8 @@ class DynamicIsland(QWidget):
 
     def _character_name(self) -> str:
         character_id = str(self.config.get("character", catalog.DEFAULT_CHARACTER))
-        return self.config.character_alias(character_id) or character_id
+        # 别名 → 角色显示名（内置名/manifest）→ 目录 id；绝不直接把 id 摆到界面上
+        return self.config.character_alias(character_id) or catalog.character_display_name(character_id)
 
     def _icon_text(self) -> str:
         return str(self._cfg.get("icon") or "🐳").strip()[:8] or "🐳"

@@ -90,6 +90,26 @@ def _no_real_dsh_profile_write(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_dsh_homes(monkeypatch):
+    """默认只让测试看见 monkeypatch 出来的 dsh home。
+
+    ``agent_link.dsh_homes()`` 默认会把 ``~/.dsh`` 与托管启动器（Unsloth Studio
+    的 ``~/.unsloth/studio/auth/agents/{dsh,.tmp/unsloth-dsh-*}``）的 home 全算上。
+    测试若不隔离，用例就会读到开发者/CI 机器上**真实**的 dsh 安装：真的跑 pnpm、
+    真的改人家的 ``cordis.patch.yml``——测试绝不许有这种副作用（同
+    ``_no_real_dsh_profile_write`` 的动机）。
+
+    需要覆盖多 home 行为的用例自行 monkeypatch 这两个钩子。
+    """
+    try:
+        from pet import agent_link
+    except Exception:
+        return
+    monkeypatch.setattr(agent_link, "_managed_dsh_homes", lambda: [])
+    monkeypatch.setattr(agent_link, "_fallback_standard_home", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _close_session_writers():
     """会话异步写盘（B8）：每个测试结束后关闭所有后台 writer，
     避免守护线程在 tmp_path 已清理后继续写盘（WinError 145 之类的 teardown 竞态）。"""

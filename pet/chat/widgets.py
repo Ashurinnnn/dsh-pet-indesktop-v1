@@ -40,6 +40,7 @@ from .models import ChatMessage
 from .pet_link import PetChatLink
 from .prompt import PromptBuilder, load_character_manifest
 from . import themes as chat_themes
+from .. import catalog
 from .service import ChatService
 from .session_store import SessionStore
 from .utils import _short_title
@@ -1411,7 +1412,10 @@ class ChatWindow(QDialog):
         chat = self._character_manifest.get("chat", {})
         chat = chat if isinstance(chat, dict) else {}
         alias = self.config.character_alias(self.character_id)
-        self.character_name = alias or str(self._character_manifest.get("name") or chat.get("name") or self.character_id)
+        self.character_name = alias or str(
+            self._character_manifest.get("name") or chat.get("name")
+            or catalog.character_display_name(self.character_id)
+        )
         self.accent_color = _safe_color(chat.get("theme_color"))
         self._base_accent = self.accent_color
         self.brand_label.setText(f"{self.character_name} AI")

@@ -120,7 +120,7 @@ def test_preset_placeholders_stay_within_the_rendering_contract():
 
     越界字段在运行时永远得不到替换、会原样露出 {xxx}，属数据缺陷。
     """
-    from pet.persona_template import PARAMETERS
+    from pet.persona_template import parameters_for
 
     pattern = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?:[.:\[][^}]*)?\}")
     for mode in BUILTIN_MODES:
@@ -131,7 +131,8 @@ def test_preset_placeholders_stay_within_the_rendering_contract():
                 for line in (lines if isinstance(lines, list) else [lines])
                 for match in pattern.finditer(line)
             }
-            allowed = set(PARAMETERS.get(key, ()))
+            # parameters_for = 上游注入的 + 渲染层全局注入的（如 {user}）
+            allowed = set(parameters_for(key))
             assert used <= allowed, (mode, key, sorted(used - allowed))
 
 

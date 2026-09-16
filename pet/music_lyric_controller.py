@@ -28,6 +28,8 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from . import user_address
+
 from . import music_lyric, now_playing
 
 log = logging.getLogger(__name__)
@@ -52,15 +54,15 @@ NOW_SINGING_TEMPLATE = "我在唱《{title}》"
 NOW_LISTENING_TEMPLATE = "正在听《{title}》"
 
 # 纯音乐时显示的随机提示。风格对齐 pet/persona_presets/whale_maid.json：
-# 第一人称「人家」、称用户「主人」、语气软萌带「～」、偶带一点小傲娇。
+# 第一人称「人家」、称用户 {user}（默认「主人」，可在设置里改）、语气软萌带「～」、偶带一点小傲娇。
 INSTRUMENTAL_HINTS = (
-    "这首歌好好听～主人也一起听听嘛。",
-    "没有词的曲子，最适合陪主人发呆啦。",
+    "这首歌好好听～{user}也一起听听嘛。",
+    "没有词的曲子，最适合陪{user}发呆啦。",
     "哼，人家听得很认真哦，不是在偷懒。",
     "这段旋律软软的，人家尾巴都跟着晃起来了～",
-    "纯音乐呀，主人别走神，人家在陪您听。",
+    "纯音乐呀，{user}别走神，人家在陪您听。",
     "只有旋律也好舒服，像趴在海面上晒太阳。",
-    "主人～这首没有歌词，人家就安静陪着您听啦。",
+    "{user}～这首没有歌词，人家就安静陪着您听啦。",
     "唔，这首越听越想眯一会儿了呢。",
 )
 
@@ -69,7 +71,7 @@ def pick_instrumental_hint(rng=None) -> str:
     """随机取一条纯音乐提示。"""
     import random
 
-    return (rng or random).choice(INSTRUMENTAL_HINTS)
+    return user_address.fill((rng or random).choice(INSTRUMENTAL_HINTS))
 
 
 def compose_bubble_text(title_line: str, lyric: str = "") -> str:

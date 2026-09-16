@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .speech_bubble import BUBBLE_STYLE_PRESETS
+from . import catalog
 from .speech_bubble_text import truncate_bubble_text
 
 from .chat.models import ChatMessage
@@ -60,7 +61,7 @@ class QuickChatBubble(QFrame):
         self._preset = BUBBLE_STYLE_PRESETS.get(style_id, BUBBLE_STYLE_PRESETS["classic_top"])
         self._tail_up = False
 
-        self.character_id = str(config.get("character", "shenshen"))
+        self.character_id = str(config.get("character", catalog.DEFAULT_CHARACTER))
         self.settings = config.chat_settings()
         self.prompt_builder = PromptBuilder(Path(__file__).resolve().parent.parent / "assets" / "characters")
         self.store = SessionStore(config.dir, getattr(config, "instance_id", ""))

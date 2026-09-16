@@ -14,6 +14,7 @@ TEMPLATE_VERSION = "persona-phrases/v1"
 # 对齐审计见 docs/PERSONA-TEMPLATE-FIELD-ALIGNMENT-2026-09-05.md。
 VARIABLES = {
     "name": "Agent 展示名称（所有事件都会注入）",
+    "user": "桌宠对你的称呼（所有事件都会注入；默认「主人」，可在设置→称呼与名字里改）",
     "command": "命令文本（approval.command=待审批命令；activity.*=工具命令，上游记录提供时可用；已折叠单行、超长截断）",
     "label": "标签（approval.tool/activity.*=工具中文标签；approval.command/generic、question.*、model_access.*、failure.*=会话标签，上游提供时可用）",
     "body": "问题内容（question.one；含 header 前缀）",
@@ -70,7 +71,7 @@ DISPLAY_HINTS = {
     "activity.run": "{name} 正在运行（{tool}）。",
     "activity.search": "{name} 正在搜索（{tool}）。",
     "agent.attention": "{name} 需要你看一眼。",
-    "agent.error": "{name} 好像出错了，主人帮忙看一下吧。",
+    "agent.error": "{name} 好像出错了，{user}帮忙看一下吧。",
     "agent.missing": "暂时没有检测到本机安装 {name}。",
     "approval.command": "{name} 请求执行：{command}",
     "approval.generic": "{name} 有审批等你决定。",
@@ -83,7 +84,7 @@ DISPLAY_HINTS = {
     "bridge.uninstall.failed": "{name} 的通信桥没有完全卸载，需要手动检查。",
     "bridge.unknown": "检测到未知的桥接事件（{event}），bridge 可能需要更新或重装。",
     "dsh.writeback.failed": "agent 写回失败，请到 DSH 界面处理。",
-    "done.attention": "{name} 停下来了，结果请主人确认。",
+    "done.attention": "{name} 停下来了，结果请{user}确认。",
     "done.success": "{name} 这一轮完成啦。",
     "failure.generic": "{name} 本轮运行失败，请检查后再运行。",
     "failure.retry": "{name} 本轮多次重试后仍未成功。",
@@ -180,6 +181,19 @@ EVENT_DESCRIPTIONS: dict[str, str] = {
 # 分两类：无条件注入的（保证可用）+ 条件注入的（CONDITIONAL_PARAMETERS，
 # 上游未提供/为空/为 null 时占位符自动隐藏，不会原样露出）。
 # 改调用点 kwargs 时必须同步改这里（有 AST 回归测试）。
+# 所有事件都无条件可用的占位符：由渲染层统一注入，**不经过调用点 kwargs**，
+# 因此不进 PARAMETERS（那里是"该事件上游能拿到什么"的严格清单，有 AST 回归
+# 测试逐 key 对齐）。工具函数见 parameters_for()。
+GLOBAL_PARAMETERS: tuple[str, ...] = ("user",)
+
+
+def parameters_for(key: str) -> tuple[str, ...]:
+    """某事件可用的**全部**占位符 = 上游注入的 + 全局注入的。"""
+    return tuple(PARAMETERS.get(key, ())) + tuple(
+        name for name in GLOBAL_PARAMETERS if name not in PARAMETERS.get(key, ())
+    )
+
+
 PARAMETERS: dict[str, tuple[str, ...]] = {
     "start": ("name",), "thinking": ("name",),
     "activity.read": ("name", "tool", "label", "command", "argsKey", "callId", "step",
@@ -350,7 +364,9 @@ def build_persona_template(config: dict[str, Any] | None, agent_keys=None) -> di
             value = []
         phrases[key] = copy.deepcopy(value)
         parameters = list(PARAMETERS.get(key, ()))
-        entries.append({"key": key, "description": EVENT_DESCRIPTIONS.get(key, key), "sources": list(EVENT_SOURCES.get(key, ())), "parameters": parameters, "displayHint": DISPLAY_HINTS.get(key, ""), "phrases": copy.deepcopy(value)})
+        # globalParameters 另列：AI 依角色卡写台词时要知道 {user} 这类全局占位符
+        # 可用，但它不属于"该事件上游注入"的语义（parameters 保持严格清单）。
+        entries.append({"key": key, "description": EVENT_DESCRIPTIONS.get(key, key), "sources": list(EVENT_SOURCES.get(key, ())), "parameters": parameters, "globalParameters": list(GLOBAL_PARAMETERS), "displayHint": DISPLAY_HINTS.get(key, ""), "phrases": copy.deepcopy(value)})
     mode = str(config.get("dialogue_mode", "custom") or "custom")
     agents = None
     if agent_keys:

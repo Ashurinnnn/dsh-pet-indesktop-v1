@@ -39,6 +39,9 @@ from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 from PySide6.QtWidgets import QMessageBox
 
 from . import agent_cost as agent_cost_mod
+from . import agent_registry
+from . import dsh_homes as dsh_homes_mod
+from . import dsh_patch_layer as dsh_patch_mod
 from .click_sound import play_sound, resolve_builtin_sound
 from .report_gates import should_report, should_report_event
 from .agent_event_protocol import parse_agent_event
@@ -130,6 +133,16 @@ def _which(name: str) -> str | None:
 DSH_PLUGIN_NAME = "@dsh-pet/bridge"
 DSH_PROFILE_HOME = Path(os.environ.get("DSH_HOME", str(Path.home() / ".dsh")))
 
+# 托管 home 里的桥接产物：插件副本落在 profiles/dsh-pet-bridge，再软链进
+# profile 的 node_modules。放在 profiles/ 下是必须的——插件 import 的
+# @deepseek-ai/dsh-llm 靠 Node 逐级向上查找解析，只有 profiles/node_modules
+# 里有它；放别处（如 <home>/dsh-pet-bridge）会解析失败。
+BRIDGE_COPY_NAME = "dsh-pet-bridge"
+BRIDGE_PATCH_FILE = "cordis.patch.yml"
+# 只落这两个文件，绝不带 node_modules：插件必须用**宿主的** @deepseek-ai/dsh-llm，
+# 自带一份会变成双份 cordis 实例（旧版手工脚本的关键经验）。
+BRIDGE_PLUGIN_FILES = ("index.js", "package.json")
+
 # Windows 探测/安装子进程隐藏窗口（与 harness_launcher 同款）：桌宠是无控制台
 # 的 GUI 进程，node/cmd 子进程不隐藏会弹出可见终端窗口。
 _HIDDEN_KWARGS: dict = (
@@ -137,18 +150,126 @@ _HIDDEN_KWARGS: dict = (
 )
 
 
-def _real_profiles() -> list[Path]:
-    """真实存在的 dsh profile：profiles 目录下含 package.json 的子目录。
+# ----------------------------------------------------------------------
+# dsh home 发现
+# ----------------------------------------------------------------------
+# 桌宠只认 DSH_HOME / ~/.dsh 时，托管启动器拉起的 dsh 是"隐形"的：Unsloth
+# Studio 把 home 放在 ~/.unsloth/studio/auth/agents/{dsh,.tmp/unsloth-dsh-*}，
+# 而桌宠从 Dock/Finder 启动时拿不到启动器注入的 DSH_HOME（GUI 进程不继承那个
+# shell 的环境）。结果是"安装成功"却装到了 ~/.dsh，真正在跑的 dsh 什么都没
+# 加载——用户只能靠外部脚本手工挂载。这里补上发现层，并按 home 归属分派安装
+# 策略（见 _install_managed_home）。
 
-    排除 node_modules 等非 profile 目录（旧版曾把它们当成 profile 去安装）。
+def _managed_dsh_homes() -> list[dsh_homes_mod.DshHome]:
+    """托管启动器（Unsloth Studio 等）创建的 dsh home。
+
+    单独成一个函数是为了给测试一个**明确的打桩点**：默认实现会扫真实机器上
+    的 ``~/.unsloth/...``，测试若不隔离就会读到开发者的真实 dsh 安装并真的
+    改写它（tests/conftest.py 有 autouse 夹具统一置空）。
     """
-    profiles_dir = DSH_PROFILE_HOME / "profiles"
+    return dsh_homes_mod.discover_managed_homes()
+
+
+def _abbreviate_home(path: Path) -> str:
+    """把 home 目录里属于用户主目录的前缀缩成 ``~``（文案里别糊一长串绝对路径）。"""
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
+def _label_for(home: dsh_homes_mod.DshHome, profile: Path, multi: bool) -> str:
+    """安装/刷新结果里某个 profile 的标签。
+
+    ``multi=False``（只有标准 home）时保持历史上的裸 profile 名：既有文案、
+    调用面与测试都按这个格式断言，没必要为一个更啰嗦的标签去改它们。
+    """
+    return f"{home.display}/{profile.name}" if multi else profile.name
+
+
+def _standard_dsh_home() -> dsh_homes_mod.DshHome:
+    """用户自己的 dsh home（DSH_HOME 或 ~/.dsh）。"""
+    path, source = dsh_homes_mod.resolve_standard_home()
+    if path != DSH_PROFILE_HOME:
+        # DSH_PROFILE_HOME 是导入期快照，测试会 monkeypatch 它；以它为准。
+        path = DSH_PROFILE_HOME
+    return dsh_homes_mod.DshHome(
+        path, dsh_homes_mod.KIND_STANDARD, source, _abbreviate_home(path),
+    )
+
+
+def _fallback_standard_home() -> dsh_homes_mod.DshHome | None:
+    """``DSH_HOME`` 指向托管目录时，用户自己的 dsh 仍在默认位置 ``~/.dsh``。
+
+    返回 None 表示"默认位置与 DSH_HOME 是同一个，不用重复列"。
+    """
+    path = dsh_homes_mod.default_standard_home()
+    if path == DSH_PROFILE_HOME:
+        return None
+    return dsh_homes_mod.DshHome(
+        path, dsh_homes_mod.KIND_STANDARD, "默认位置 ~/.dsh", _abbreviate_home(path),
+    )
+
+
+def dsh_homes() -> list[dsh_homes_mod.DshHome]:
+    """桌宠要挂桥接的全部 dsh home：标准 home + 托管 home。
+
+    托管判断按路径而不是按启动方式：``DSH_HOME`` 恰好指着 Unsloth 的 home 时
+    （从 unsloth 的 shell 里拉起桌宠就会这样），它仍按托管处理，标准位让给
+    ``~/.dsh``——否则同一台机器上挂载策略会随"从哪启动桌宠"漂移。
+    """
+    managed = _managed_dsh_homes()
+    home = _standard_dsh_home()
+    # "是不是托管 home"两个来源都要看：按路径判定（is_managed_path），以及
+    # 发现层已经把它列进托管清单（那样即使路径判定用的 env 视图不同也一致）。
+    is_managed = dsh_homes_mod.is_managed_path(home.path) or any(
+        dsh_homes_mod.same_path(home.path, m.path) for m in managed
+    )
+    if is_managed:
+        fallback = _fallback_standard_home()
+        return dsh_homes_mod.order_homes([] if fallback is None else [fallback], managed)
+    return dsh_homes_mod.order_homes([home], managed)
+
+
+def _real_profiles_of(profiles_dir: Path) -> list[Path]:
+    """某个 dsh home 下真实存在的 profile：含 package.json 的子目录。
+
+    排除两类非 profile 目录：
+    * ``node_modules`` 之类的杂项（旧版曾把它当 profile 去安装）；
+    * **桌宠自己的桥接副本**（``profiles/dsh-pet-bridge``）——它的 package.json
+      里 name 就是 @dsh-pet/bridge，被当成 profile 会让安装流程去"刷新"它自己，
+      是历史遗留的误伤源。
+    """
     if not profiles_dir.is_dir():
         return []
-    return sorted(
-        p for p in profiles_dir.iterdir()
-        if p.is_dir() and (p / "package.json").is_file()
-    )
+    result: list[Path] = []
+    for path in profiles_dir.iterdir():
+        try:
+            if not path.is_dir() or not (path / "package.json").is_file():
+                continue
+        except OSError:
+            continue
+        if _is_bridge_copy(path):
+            continue
+        result.append(path)
+    return sorted(result)
+
+
+def _is_bridge_copy(profile_dir: Path) -> bool:
+    """该目录是不是桌宠落下的桥接插件副本（而非真实 dsh profile）。"""
+    if profile_dir.name != BRIDGE_COPY_NAME:
+        return False
+    pkg = _read_manifest(profile_dir)
+    return bool(pkg) and str(pkg.get("name") or "") == DSH_PLUGIN_NAME
+
+
+def _real_profiles() -> list[Path]:
+    """默认（标准）home 下的真实 profile。
+
+    保留原签名与语义：既有调用面与测试都通过 monkeypatch ``DSH_PROFILE_HOME``
+    来指定 home。跨 home 的安装编排见 :func:`dsh_homes`。
+    """
+    return _real_profiles_of(DSH_PROFILE_HOME / "profiles")
 
 
 # pnpm / npm 的 JS 入口在包内的相对路径：不同版本/安装方式各不相同
@@ -613,6 +734,196 @@ def _remove_linked_plugin_dir(profile_dir: Path) -> None:
             link.unlink()
     except OSError as exc:
         log.debug("清理桥接插件链接失败(%s): %s", profile_dir, exc)
+
+
+# ---------------------------------------------------------------------------
+# 托管 home 的桥接挂载：走 cordis.patch.yml 补丁层
+#
+# 为什么不复用标准 home 那套（pnpm add + dsh.profile.bundles）：
+# 1) 托管 home 的 profiles/ 由启动器创建和维护，改它的 package.json 是越界；
+#    而 cordis.patch.yml 是 dsh 自己留的"给外部加东西"的位置（模板原文就是
+#    "Edit cordis.patch.yml, not this file"）。
+# 2) 补丁层在 profile 声明 patchReload: live 时**热加载**：挂上就生效，
+#    不用重启 dsh、不打断正在进行的对话；pnpm 路线则要重启。
+# 3) 不依赖 pnpm / 网络：临时 home 每次启动都是新目录，挂载必须是"快且必然
+#    成功"的三步文件操作，而不是一个可能几十秒、可能失败的包管理器调用。
+# ---------------------------------------------------------------------------
+
+def _bridge_copy_dir(home: Path) -> Path:
+    """托管 home 里的插件副本目录。"""
+    return home / "profiles" / BRIDGE_COPY_NAME
+
+
+def _bridge_link_path(profile_dir: Path) -> Path:
+    """profile 里指向插件副本的 node_modules 链接路径。"""
+    return profile_dir / "node_modules" / "@dsh-pet" / "bridge"
+
+
+def _bridge_source_ready(plugin_dir: Path) -> bool:
+    return all((plugin_dir / name).is_file() for name in BRIDGE_PLUGIN_FILES)
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    """两个文件内容是否一致（先比大小短路，避免每次读 70KB）。"""
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
+
+def _sync_bridge_copy(plugin_dir: Path, copy_dir: Path) -> bool:
+    """把内置插件落到 ``<home>/profiles/dsh-pet-bridge``（内容一致则不写）。
+
+    只落 index.js / package.json，绝不带 node_modules：插件必须用宿主的
+    ``@deepseek-ai/dsh-llm``，自带一份会变成双份 cordis 实例。
+    """
+    try:
+        copy_dir.mkdir(parents=True, exist_ok=True)
+        for name in BRIDGE_PLUGIN_FILES:
+            src, dst = plugin_dir / name, copy_dir / name
+            if dst.is_file() and _same_bytes(src, dst):
+                continue
+            shutil.copyfile(src, dst)
+    except OSError:
+        log.exception("桥接插件副本落地失败: %s", copy_dir)
+        return False
+    return True
+
+
+def _managed_bridge_copy_stale(home: Path, plugin_dir: Path) -> bool:
+    """托管 home 的插件副本是否与当前内置插件不一致（内容不同或缺文件）。
+
+    为什么需要：profile 里的链接指向的是**副本目录**，重新打包/换构建后副本
+    还是旧的，dsh 会继续加载旧代码。启动自检据此把它刷成当前构建。
+    """
+    copy_dir = _bridge_copy_dir(home)
+    if not _bridge_source_ready(copy_dir):
+        return True
+    return any(not _same_bytes(plugin_dir / name, copy_dir / name)
+               for name in BRIDGE_PLUGIN_FILES)
+
+
+def _remove_bridge_link(link: Path) -> None:
+    """摘掉 profile 里的桥接链接（符号链接 / 复制式目录都认）。"""
+    try:
+        if link.is_symlink():
+            link.unlink()
+        elif link.is_dir():
+            shutil.rmtree(link, ignore_errors=True)
+        elif link.exists():
+            link.unlink()
+    except OSError as exc:
+        log.debug("清理桥接链接失败(%s): %s", link, exc)
+
+
+def _ensure_bridge_link(link: Path, target: Path) -> bool:
+    """让 ``node_modules/@dsh-pet/bridge`` 指向插件副本。
+
+    优先建符号链接（POSIX，或开了开发者模式的 Windows）；建不出来就退化成
+    "把插件文件复制进 node_modules"。两种形态对 Node 的模块解析等价。
+    """
+    try:
+        if link.is_symlink():
+            try:
+                if link.resolve() == target.resolve():
+                    return True
+            except OSError:
+                pass
+            link.unlink()
+        elif link.is_dir():
+            # 复制式安装的旧产物：文件可能已过期，整个换掉（只动我们自己的路径）
+            shutil.rmtree(link, ignore_errors=True)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            link.symlink_to(target, target_is_directory=True)
+            return True
+        except OSError:
+            link.mkdir(parents=True, exist_ok=True)
+            for name in BRIDGE_PLUGIN_FILES:
+                shutil.copyfile(target / name, link / name)
+            return True
+    except OSError:
+        log.exception("桥接链接建立失败: %s", link)
+        return False
+
+
+def _install_managed_home(home: dsh_homes_mod.DshHome,
+                          plugin_dir: Path) -> tuple[list[Path], list[str]]:
+    """给一个托管 home 挂桥接，返回 (成功的 profile, 失败说明)。"""
+    succeeded: list[Path] = []
+    failed: list[str] = []
+    if not _sync_bridge_copy(plugin_dir, _bridge_copy_dir(home.path)):
+        return [], [f"{home.display}: 插件副本写入失败"]
+
+    profiles = _real_profiles_of(home.profiles_dir)
+    if not profiles:
+        return [], [f"{home.display}: 该 home 下还没有 dsh profile（dsh 起过一次才有）"]
+
+    entry = dsh_patch_mod.build_bridge_entry()
+    for profile in profiles:
+        if not _ensure_bridge_link(_bridge_link_path(profile), _bridge_copy_dir(home.path)):
+            failed.append(f"{home.display}/{profile.name}: node_modules 链接建立失败")
+            continue
+        patch = profile / BRIDGE_PATCH_FILE
+        try:
+            text = dsh_patch_mod.read(patch)
+        except OSError as exc:
+            failed.append(f"{home.display}/{profile.name}: 补丁层读取失败 {exc}")
+            continue
+        if text is None:
+            text = _PROFILE_PATCH_TEMPLATE
+        try:
+            updated = dsh_patch_mod.upsert_entry(text, entry)
+        except dsh_patch_mod.PatchLayerError as exc:
+            # 补丁层不是"顶层数组"形态：宁可挂不上，也不能改坏用户手写的内容
+            failed.append(f"{home.display}/{profile.name}: 补丁层格式无法识别，已跳过（{exc}）")
+            continue
+        if updated == text and patch.is_file():
+            succeeded.append(profile)
+            continue
+        try:
+            dsh_patch_mod.write_atomic(patch, updated)
+        except OSError as exc:
+            failed.append(f"{home.display}/{profile.name}: 补丁层写入失败 {exc}")
+            continue
+        succeeded.append(profile)
+    return succeeded, failed
+
+
+def _uninstall_managed_home(home: dsh_homes_mod.DshHome) -> list[str]:
+    """卸掉一个托管 home 的桥接，返回失败说明（空列表=全部成功）。
+
+    补丁层条目、node_modules 链接、插件副本三处一起清。副本是本插件自己落的，
+    清掉不留垃圾；下次开启联动会重新落一份。
+    """
+    failed: list[str] = []
+    for profile in _real_profiles_of(home.profiles_dir):
+        _remove_bridge_link(_bridge_link_path(profile))
+        patch = profile / BRIDGE_PATCH_FILE
+        try:
+            text = dsh_patch_mod.read(patch)
+        except OSError as exc:
+            failed.append(f"{home.display}/{profile.name}: 补丁层读取失败 {exc}")
+            continue
+        if not text:
+            continue
+        try:
+            updated = dsh_patch_mod.remove_entry(text)
+        except dsh_patch_mod.PatchLayerError as exc:
+            failed.append(f"{home.display}/{profile.name}: 补丁层格式无法识别，已跳过（{exc}）")
+            continue
+        if updated == text:
+            continue
+        try:
+            dsh_patch_mod.write_atomic(patch, updated)
+        except OSError as exc:
+            failed.append(f"{home.display}/{profile.name}: 补丁层写入失败 {exc}")
+    copy_dir = _bridge_copy_dir(home.path)
+    if copy_dir.is_dir():
+        shutil.rmtree(copy_dir, ignore_errors=True)
+    return failed
 
 
 # ---------------------------------------------------------------------------
@@ -1538,10 +1849,22 @@ class BaseAgentMonitor(QObject):
 class DshMonitor(BaseAgentMonitor):
     """DeepSeek Harness (DSH) 监视器。
 
-    事件来源：随桌宠内置的桥接插件（integrations/dsh-pet-bridge），开启联动时
-    经用户同意后通过 `dsh plugin --profile web install <dir>` 一键安装（关闭时自动卸载）。
-    插件把 agent 状态写入固定桥目录 `<数据基目录>/dsh-pet-bridge/dsh.jsonl`
-    （与桌宠变体无关，源码/打包版路径一致），本监视器 byte-offset tail 读取。
+    事件来源：随桌宠内置的桥接插件（integrations/dsh-pet-bridge）。开启联动时
+    经用户同意后安装（关闭时自动卸载），插件把 agent 状态写入固定桥目录
+    ``<数据基目录>/dsh-pet-bridge/dsh-*.jsonl``（与桌宠变体无关，源码/打包版
+    路径一致），本监视器 byte-offset tail 读取。
+
+    安装目标不再只有 ``~/.dsh``：托管启动器拉起的 dsh（Unsloth Studio 的
+    ``unsloth start dsh [--persist]``）把 home 放在别处，而且默认模式下**每次
+    启动都是一个新的临时目录**（见 :func:`dsh_homes`）。两类 home 的挂载方式
+    不同，因为归属不同：
+
+    * **标准 home**（``DSH_HOME`` / ``~/.dsh``，profile 归用户）：沿用既有方式，
+      pnpm add + 写 ``dsh.profile.bundles``；
+    * **托管 home**（启动器创建并维护）：不碰 ``package.json``，只往
+      ``cordis.patch.yml`` 补丁层插一条 insert、再落一份插件副本。这条路
+      **不需要 node/pnpm**（纯文件操作），且 profile 的 ``patchReload: live``
+      让它热加载——挂上即生效，不用重启 dsh、不打断正在进行的对话。
     """
 
     PLUGIN_NAME = "@dsh-pet/bridge"
@@ -1559,6 +1882,8 @@ class DshMonitor(BaseAgentMonitor):
         self._tailer = DirGlobTailer(self.events_dir, pattern="dsh*.jsonl")
         # 启动自检只做一次（每实例）：pnpm 解析可能数十秒，绝不能重复触发
         self._link_check_started = False
+        # 托管 home 巡检：上一次还在跑时跳过，避免线程堆积
+        self._managed_poll_running = False
 
     @staticmethod
     def bundled_plugin_dir() -> Path | None:
@@ -1574,8 +1899,8 @@ class DshMonitor(BaseAgentMonitor):
         return None
 
     @classmethod
-    def bridge_link_stale(cls) -> list[tuple[str, str]]:
-        """已装插件、但 `link:` 目标不是当前内置插件目录（或目标已失效）的 profile。
+    def _stale_standard_profiles(cls, plugin: Path) -> list[tuple[dsh_homes_mod.DshHome, Path, str]]:
+        """标准 home 里 link 目标不是当前内置插件目录（或已失效）的 profile。
 
         为什么需要：profile 里记的是**安装那一刻的绝对路径**（源码运行是仓库
         integrations/，打包版是 dist-onedir/<构建名>/_internal/integrations/...），
@@ -1585,42 +1910,56 @@ class DshMonitor(BaseAgentMonitor):
 
         只认路径型 spec：从 registry 装的版本型 spec 视为用户有意为之，不动。
         """
-        plugin = cls.bundled_plugin_dir()
-        if plugin is None:
-            return []
         try:
             current = plugin.resolve()
         except OSError:
             current = plugin
-        stale: list[tuple[str, str]] = []
-        for profile in _real_profiles():
-            pkg = _read_manifest(profile)
-            if pkg is None or not _manifest_has_plugin(pkg):
+        stale: list[tuple[dsh_homes_mod.DshHome, Path, str]] = []
+        for home in dsh_homes():
+            if home.managed:
                 continue
-            spec = str((pkg.get("dependencies") or {}).get(DSH_PLUGIN_NAME) or "")
-            target = _path_spec_target(spec, profile)
-            if target is None:  # 版本型 spec：不属于 link 陈旧
-                continue
-            if not target.exists() or target != current:
-                stale.append((profile.name, spec))
+            for profile in _real_profiles_of(home.profiles_dir):
+                pkg = _read_manifest(profile)
+                if pkg is None or not _manifest_has_plugin(pkg):
+                    continue
+                spec = str((pkg.get("dependencies") or {}).get(DSH_PLUGIN_NAME) or "")
+                target = _path_spec_target(spec, profile)
+                if target is None:  # 版本型 spec：不属于 link 陈旧
+                    continue
+                if not target.exists() or target != current:
+                    stale.append((home, profile, spec))
         return stale
 
     @classmethod
-    def refresh_stale_bridge_links(cls) -> list[str]:
-        """把陈旧 link 刷新为当前内置插件目录，返回刷新成功的 profile 名。
+    def bridge_link_stale(cls) -> list[tuple[str, str]]:
+        """（标签, spec）列表：link 已陈旧的 profile。
 
-        只处理**已装插件**的 profile——启动自检绝不替用户安装（安装需用户同意）。
+        标签在"只有一个 home"时就是 profile 名（保持既有文案与调用面）；多 home
+        时带上 home 短名——否则用户看到三个都叫 ``web`` 的条目无从判断是哪一个。
         """
         plugin = cls.bundled_plugin_dir()
         if plugin is None:
             return []
-        stale_names = {name for name, _spec in cls.bridge_link_stale()}
-        if not stale_names:
+        multi = len(dsh_homes()) > 1
+        return [
+            (_label_for(home, profile, multi), spec)
+            for home, profile, spec in cls._stale_standard_profiles(plugin)
+        ]
+
+    @classmethod
+    def refresh_stale_bridge_links(cls) -> list[str]:
+        """把陈旧 link / 陈旧插件副本刷成当前内置插件，返回刷新成功的标签。
+
+        只处理**已装插件**的目标——启动自检绝不替用户安装（安装需用户同意）。
+        托管 home 的首次挂载是另一条路径（见 :meth:`adopt_managed_homes`）：
+        它由"用户已开启 DSH 联动"授权，而不是由自检悄悄安装。
+        """
+        plugin = cls.bundled_plugin_dir()
+        if plugin is None:
             return []
+        multi = len(dsh_homes()) > 1
         refreshed: list[str] = []
-        for profile in _real_profiles():
-            if profile.name not in stale_names:
-                continue
+        for home, profile, _spec in cls._stale_standard_profiles(plugin):
             # 与安装路径同源：manifest 里可能存在指向不存在路径的依赖（旧构建目录 /
             # 版本号变更的 tgz），裸 pnpm 会一直失败。先按探测结果修正再重试一次，
             # 否则启动自检每次都在同一处静默失败，link 永远刷不新。
@@ -1640,13 +1979,20 @@ class DshMonitor(BaseAgentMonitor):
                     _manifest_set_bundle(pkg, profile, True)
                 except Exception:
                     log.exception("桥接 bundles 写入失败: %s", profile.name)
-            refreshed.append(profile.name)
+            refreshed.append(_label_for(home, profile, multi))
+        # 托管 home：profile 里的链接指向"插件副本目录"，副本过期时 dsh 会继续
+        # 加载旧代码（与 link 陈旧同型的问题），按内容比对后重刷。
+        for home in dsh_homes():
+            if not home.managed or not _managed_bridge_copy_stale(home.path, plugin):
+                continue
+            if _sync_bridge_copy(plugin, _bridge_copy_dir(home.path)):
+                refreshed.append(f"{home.display}/插件副本")
         return refreshed
 
     def schedule_link_refresh_check(self, spawn=None) -> None:
-        """启动后自检一次桥接 link（每实例一次；后台线程，不阻塞 GUI）。
+        """启动后自检一次：刷陈旧 link + 挂上已存在的托管 home（每实例一次）。
 
-        spawn 仅为测试注入：默认真起守护线程。
+        后台线程，不阻塞 GUI。spawn 仅为测试注入：默认真起守护线程。
         """
         if self._link_check_started:
             return
@@ -1657,6 +2003,35 @@ class DshMonitor(BaseAgentMonitor):
         except Exception:
             log.exception("桥接 link 自检启动失败")
 
+    def schedule_managed_home_poll(self, spawn=None) -> None:
+        """周期性把桥接挂到**新出现**的托管 home（后台线程，不重叠）。
+
+        托管 home 的默认形态就是"每次 ``unsloth start dsh`` 建一个新的临时目录"，
+        一次性安装在下次启动时就失效了。用户开启 DSH 联动即授权桌宠持续挂载，
+        所以这里允许安装——但**只碰托管 home**（补丁层 + 插件副本），不动用户
+        自己的 ``~/.dsh``。上一次巡检还在跑时直接跳过，不排队堆积。
+        """
+        if self._managed_poll_running:
+            return
+        self._managed_poll_running = True
+        runner = spawn or self._spawn_link_check
+        try:
+            runner(self._managed_poll_worker)
+        except Exception:
+            self._managed_poll_running = False
+            log.exception("托管 dsh home 巡检启动失败")
+
+    def _managed_poll_worker(self) -> None:
+        try:
+            adopted = self.adopt_managed_homes()
+        except Exception:
+            log.exception("托管 dsh home 巡检失败")
+        else:
+            if adopted:
+                log.info("桥接已挂到新出现的托管 dsh home: %s", ", ".join(adopted))
+        finally:
+            self._managed_poll_running = False
+
     @staticmethod
     def _spawn_link_check(target) -> None:
         threading.Thread(
@@ -1664,14 +2039,24 @@ class DshMonitor(BaseAgentMonitor):
         ).start()
 
     def _refresh_links_worker(self) -> None:
-        """后台刷新陈旧 link：失败只记日志（自检是静默修复，不打扰用户）。"""
+        """后台自检：刷新陈旧 link，并把桥接挂到已存在的托管 home。
+
+        失败只记日志（自检是静默修复，不打扰用户；用户真正点开关时才弹气泡）。
+        """
         try:
             refreshed = self.refresh_stale_bridge_links()
         except Exception:
             log.exception("桥接 link 自检失败")
-            return
-        if refreshed:
-            log.info("桥接 link 已刷新为当前构建: %s", ", ".join(refreshed))
+        else:
+            if refreshed:
+                log.info("桥接 link 已刷新为当前构建: %s", ", ".join(refreshed))
+        try:
+            adopted = self.adopt_managed_homes()
+        except Exception:
+            log.exception("托管 dsh home 挂载失败")
+        else:
+            if adopted:
+                log.info("桥接已挂到托管 dsh home: %s", ", ".join(adopted))
 
     @staticmethod
     def _summarize_install_error(output: str) -> str:
@@ -1716,35 +2101,30 @@ class DshMonitor(BaseAgentMonitor):
         return cleaned_line or "未知错误"
 
     @classmethod
-    def install_bridge(cls) -> tuple[bool, str]:
-        """一键安装桥接插件到所有真实存在的 dsh profile。
+    def _install_standard_home(cls, home: dsh_homes_mod.DshHome, plugin: Path,
+                               create_missing: bool) -> tuple[list[Path], list[str], list[str]]:
+        """标准 home：pnpm add + 维护 bundles 层。
 
-        直接调 pnpm（node 直调，见模块头部注释）并维护 profile 的 bundles 层，
-        不经过 dsh CLI（规避其在 Windows 上拆碎含空格路径的缺陷）；
-        已安装的 profile 幂等跳过（只补 bundles 层）；失败不回滚已成功项。
-        返回 (成功与否, 说明)。
+        返回 (成功的 profile, 失败说明, 依赖路径修复说明)。直接调 pnpm（node 直调，
+        见模块头部注释），不经过 dsh CLI（规避其在 Windows 上拆碎含空格路径的缺陷）；
+        已安装的 profile 幂等刷新；失败不回滚已成功项。
         """
-        plugin = cls.bundled_plugin_dir()
-        if plugin is None:
-            return False, "找不到内置桥接插件（integrations/dsh-pet-bridge）"
-        if _which("node") is None and _pnpm_command() is None:
-            return False, "找不到 node，请先安装 Node.js（需包含 npm）"
-        if _pnpm_command() is None:
-            return False, _PNPM_MISSING_HINT
-
-        profiles = _real_profiles()
+        profiles = _real_profiles_of(home.profiles_dir)
         if not profiles:
+            if not create_missing:
+                # 这台机器用的是别的 home；不为一个不存在的 ~/.dsh 凭空造 profile
+                return [], [], []
             # 全新 dsh（从未运行过）没有 profile：先按 dsh initProfile 三件套
             # 补出默认 web profile 再安装；补不出才报错，不把新用户挡住。
-            if not _ensure_profile(DSH_PROFILE_HOME / "profiles" / "web"):
-                return False, ("没有可用的 dsh profile（~/.dsh/profiles 下无 package.json），"
-                               "且自动补齐默认 web profile 失败")
-            profiles = _real_profiles()
+            if not _ensure_profile(home.profiles_dir / "web"):
+                return [], [(f"{home.display}: 没有可用的 dsh profile"
+                             "（profiles 下无 package.json），且自动补齐默认 web profile 失败")], []
+            profiles = _real_profiles_of(home.profiles_dir)
             if not profiles:
-                return False, "补齐默认 web profile 后仍未识别到 dsh profile"
+                return [], [f"{home.display}: 补齐默认 web profile 后仍未识别到 dsh profile"], []
 
-        failed = []
-        succeeded = []
+        failed: list[str] = []
+        succeeded: list[Path] = []
         repaired_notes: list[str] = []
         for profile in profiles:
             pkg = _read_manifest(profile)
@@ -1774,7 +2154,7 @@ class DshMonitor(BaseAgentMonitor):
                 except Exception as exc:
                     failed.append(f"{profile.name}: bundles 写入失败 {exc}")
                     continue
-                succeeded.append(profile.name)
+                succeeded.append(profile)
                 continue
             rc, out, repaired = _run_pnpm_repairing_specs(profile, "add", str(plugin))
             if rc != 0:
@@ -1794,10 +2174,70 @@ class DshMonitor(BaseAgentMonitor):
             except Exception as exc:
                 failed.append(f"{profile.name}: bundles 写入失败 {exc}")
                 continue
-            succeeded.append(profile.name)
+            succeeded.append(profile)
+        return succeeded, failed, repaired_notes
+
+    @classmethod
+    def install_bridge(cls) -> tuple[bool, str]:
+        """一键安装桥接插件到**所有发现的 dsh home**。返回 (成功与否, 说明)。
+
+        覆盖 ``~/.dsh`` 与托管启动器的 home（Unsloth Studio 等，含临时实例），
+        各自用与归属匹配的方式挂载（见类文档）。两类互不牵连：没装 pnpm 只拦得住
+        需要 pnpm 的那一类，托管 home 照挂。
+        """
+        plugin = cls.bundled_plugin_dir()
+        if plugin is None:
+            return False, "找不到内置桥接插件（integrations/dsh-pet-bridge）"
+
+        homes = dsh_homes()
+        multi = len(homes) > 1
+        # 只有标准 home 一个候选时才允许凭空补 profile：那正是"装了 dsh 还没跑过"
+        # 的全新用户；已经有别的 home 在用时，不该再给不存在的 ~/.dsh 造目录。
+        create_missing = len(homes) == 1
+        # 只对"真的有东西可装"的标准 home 做依赖体检与报错：一个不存在的 ~/.dsh
+        # 不该让整次安装被判失败（机器上只有 UnsLoth 的用户就是这样）。
+        standard = [
+            h for h in homes
+            if not h.managed and (create_missing or _real_profiles_of(h.profiles_dir))
+        ]
+        managed = [h for h in homes if h.managed]
+
+        # 标准 home 走 pnpm，先做依赖体检；托管 home 是纯文件操作，不需要 node。
+        pnpm_problem = ""
+        if standard:
+            if _which("node") is None and _pnpm_command() is None:
+                pnpm_problem = "找不到 node，请先安装 Node.js（需包含 npm）"
+            elif _pnpm_command() is None:
+                pnpm_problem = _PNPM_MISSING_HINT
+
+        failed: list[str] = []
+        succeeded: list[str] = []
+        repaired_notes: list[str] = []
+
+        for home in standard:
+            if pnpm_problem:
+                failed.append(f"{home.display}（{home.source}）: {pnpm_problem}")
+                continue
+            names, errs, notes = cls._install_standard_home(
+                home, plugin, create_missing=create_missing,
+            )
+            succeeded += [_label_for(home, p, multi) for p in names]
+            failed += errs
+            repaired_notes += notes
+
+        for home in managed:
+            names, errs = _install_managed_home(home, plugin)
+            succeeded += [_label_for(home, p, multi) for p in names]
+            failed += errs
+
         if failed:
             # 不做整批回滚：已装成功的保持不动（旧版回滚会把刚装好的反而卸掉）
             return False, "部分实例安装失败（已装成功的保持不动）——" + "；".join(failed)
+        if not succeeded:
+            return False, (
+                "没有找到可挂载的 dsh 实例（已检查：" + dsh_homes_mod.describe(homes) + "）。"
+                "先启动一次 dsh 让它生成 profile，再试一次。"
+            )
         note = ""
         if repaired_notes:
             note = (
@@ -1807,43 +2247,75 @@ class DshMonitor(BaseAgentMonitor):
         return True, f"桥接插件已安装到 {len(succeeded)} 个 dsh 实例（{', '.join(succeeded)}）{note}"
 
     @classmethod
+    def adopt_managed_homes(cls) -> list[str]:
+        """把桥接挂到**新出现的**托管 home 上，返回本次挂载的标签。
+
+        托管 home 的默认形态是"每次启动一个新的临时目录"，所以一次性安装留不住：
+        用户在设置里开启 DSH 联动 = 授权桌宠持续把桥接挂到它拉起的 dsh 上。这里
+        只碰托管 home（补丁层 + 插件副本），不动用户自己的 home。
+
+        幂等且便宜：内容一致时一个字节都不写，因此可以在启动路径与低速轮询里反复调。
+        """
+        plugin = cls.bundled_plugin_dir()
+        if plugin is None:
+            return []
+        homes = [h for h in dsh_homes() if h.managed]
+        if not homes:
+            return []
+        multi = len(dsh_homes()) > 1
+        adopted: list[str] = []
+        for home in homes:
+            names, errs = _install_managed_home(home, plugin)
+            if errs:
+                # 自愈路径不打扰用户：失败只记日志（用户真正点开关时才会看到气泡）
+                log.debug("托管 dsh home 自动挂载未完全成功 %s: %s", home.path, "；".join(errs))
+            adopted += [_label_for(home, p, multi) for p in names]
+        return adopted
+
+    @classmethod
     def uninstall_bridge(cls) -> bool:
         """关闭联动时卸载桥接插件。返回是否全部成功（失败记日志）。
 
-        幂等：未安装的 profile 直接视为成功；不再依赖 dsh CLI（同 install_bridge）。
+        幂等：未安装的目标直接视为成功；不再依赖 dsh CLI（同 install_bridge）。
         没有 pnpm 时不能直接报成功：manifest 里的 `link:` 条目还指着即将被删除的
         程序目录（2026-09 dsh 事故同型），改为纯 JSON 手改卸载——备份 package.json、
         删依赖条目与 dsh.profile.bundles 登记、尽力删 profile 内的插件链接。
         """
         has_pnpm = _pnpm_command() is not None
         ok = True
-        for profile in _real_profiles():
-            pkg = _read_manifest(profile)
-            if pkg is None or not _manifest_has_plugin(pkg):
-                continue  # 未安装视为成功（幂等）
-            if has_pnpm:
-                rc, out = _run_pnpm(profile, "remove", DSH_PLUGIN_NAME)
-                if rc != 0:
+        for home in dsh_homes():
+            if home.managed:
+                for problem in _uninstall_managed_home(home):
                     ok = False
-                    log.warning("卸载 DSH 桥接插件失败(%s): %s", profile.name, (out or "")[-150:])
-                    continue
+                    log.warning("卸载 DSH 桥接插件失败: %s", problem)
+                continue
+            for profile in _real_profiles_of(home.profiles_dir):
                 pkg = _read_manifest(profile)
-                if pkg is None:
+                if pkg is None or not _manifest_has_plugin(pkg):
+                    continue  # 未安装视为成功（幂等）
+                if has_pnpm:
+                    rc, out = _run_pnpm(profile, "remove", DSH_PLUGIN_NAME)
+                    if rc != 0:
+                        ok = False
+                        log.warning("卸载 DSH 桥接插件失败(%s): %s", profile.name, (out or "")[-150:])
+                        continue
+                    pkg = _read_manifest(profile)
+                    if pkg is None:
+                        ok = False
+                        log.warning("卸载 DSH 桥接插件失败(%s): 卸载后 package.json 读取失败", profile.name)
+                        continue
+                else:
+                    pkg = _uninstall_manifest_without_pnpm(profile, pkg)
+                    if pkg is None:
+                        ok = False
+                        log.warning("卸载 DSH 桥接插件失败(%s): package.json 手改失败", profile.name)
+                        continue
+                    _remove_linked_plugin_dir(profile)
+                try:
+                    _manifest_set_bundle(pkg, profile, False)
+                except Exception as exc:
                     ok = False
-                    log.warning("卸载 DSH 桥接插件失败(%s): 卸载后 package.json 读取失败", profile.name)
-                    continue
-            else:
-                pkg = _uninstall_manifest_without_pnpm(profile, pkg)
-                if pkg is None:
-                    ok = False
-                    log.warning("卸载 DSH 桥接插件失败(%s): package.json 手改失败", profile.name)
-                    continue
-                _remove_linked_plugin_dir(profile)
-            try:
-                _manifest_set_bundle(pkg, profile, False)
-            except Exception as exc:
-                ok = False
-                log.warning("卸载 DSH 桥接插件失败(%s): bundles 清理失败 %s", profile.name, exc)
+                    log.warning("卸载 DSH 桥接插件失败(%s): bundles 清理失败 %s", profile.name, exc)
         return ok
 
 
@@ -2210,6 +2682,203 @@ class OpenCodeMonitor(BaseAgentMonitor):
                 self._emit_tool(tool, emit_gen)
 
 
+# ----------------------------------------------------------------------
+# OpenAI Codex：会话 rollout 的解析
+# ----------------------------------------------------------------------
+# Codex 把每轮会话写成一份 rollout：
+#   ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<本地时间>-<uuid>.jsonl
+# 每行一条 JSON 记录，形状是 {timestamp, ordinal, type, payload}，payload 里还有
+# 一个 type。这里**只认这两个 type 字段**，其余内容（加密的 reasoning/agent_message
+# 正文、token 计数、world_state、token_usage_record）一律不解析——桌宠要的是
+# "在忙 / 闲着 / 在用什么工具"，不是对话内容，少读一份就少一份隐私面。
+CODEX_SUBAGENT_THREAD_SOURCES = frozenset({"subagent", "guardian_review"})
+# 子代理会给每个执行体写独立 rollout，其 task_started/task_complete 与主会话交错；
+# 不过滤的话每派发/回收一个子代理就触发一次 busy→idle，把"任务完成"气泡刷爆
+# （与 opencode 的 session.parent_id 过滤同因）。
+
+
+def codex_payload_type(record: dict) -> str:
+    """rollout 记录的 payload.type（不是 payload 就返回空串）。"""
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("type") or "")
+
+
+def codex_record_state(record: dict) -> str:
+    """Codex rollout 记录 → 统一状态词汇；``""`` 表示这条不驱动状态。
+
+    映射依据（2026-09 实测，codex-cli 0.154）：
+      ``event_msg/task_started``   一轮开始          → working
+      ``event_msg/task_complete``  一轮结束          → idle
+      ``response_item/reasoning`` 正在推理           → thinking
+      ``custom_tool_call``/``function_call`` 调用工具 → working
+      ``agent_message`` 子代理回消息（主会话仍在等）  → working
+    """
+    payload_type = codex_payload_type(record)
+    if payload_type == "task_started":
+        return "working"
+    if payload_type == "task_complete":
+        return "idle"
+    if payload_type == "reasoning":
+        return "thinking"
+    if payload_type in ("custom_tool_call", "function_call"):
+        return "working"
+    if payload_type == "agent_message":
+        return "working"
+    return ""
+
+
+def codex_record_tool(record: dict) -> str:
+    """记录里的工具名；非工具记录返回 ``""``。
+
+    带 namespace 的（``collaboration.spawn_agent``）原样带出来，标签查表会
+    自动回退到末段名字（见 ``AgentLinkManager.tool_label``）。
+    """
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    if str(payload.get("type") or "") not in ("custom_tool_call", "function_call"):
+        return ""
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return ""
+    namespace = str(payload.get("namespace") or "").strip()
+    return f"{namespace}.{name}" if namespace else name
+
+
+def codex_session_is_subagent(meta: dict) -> bool:
+    """``session_meta`` 的 payload 是否属于子代理会话。"""
+    if not isinstance(meta, dict):
+        return False
+    source = meta.get("source")
+    if isinstance(source, dict) and "subagent" in source:
+        return True
+    thread_source = meta.get("thread_source")
+    return isinstance(thread_source, str) and thread_source in CODEX_SUBAGENT_THREAD_SOURCES
+
+
+class CodexMonitor(BaseAgentMonitor):
+    """OpenAI Codex 监视器。
+
+    事件来源：Codex 自己写的会话 rollout（``~/.codex/sessions/**/rollout-*.jsonl``），
+    多文件增量 tail——**只读**：不改 Codex 的任何配置、不装插件、不联网、不读正文。
+
+    为什么不用 hooks / notify：那要改 ``~/.codex/config.toml``（用户的全局配置，
+    Codex 桌面端、CLI、其它插件都在读同一份），而 rollout 是 Codex 无论如何都会
+    写下的事实记录，零侵入、无需用户授权弹窗，且信息比 notify 更全。
+    """
+
+    # rollout 目录发现降频：文件系统扫描 15s 一次（行 tail 仍走 1.5s 轮询）。
+    # 已知边界：新会话最长 15s 才被纳入 tail；纳入时 backfill 防护会跳到文件
+    # 末尾，所以那段间隙里的事件会错过——与 Cursor 监视器的取舍一致。
+    _SCAN_INTERVAL_S = 15.0
+    # 只看最近有写入的 rollout：Codex 会长期保留历史会话，全量 tail 既无意义
+    # 又会把陈年 task_complete 当成"刚刚完成"。
+    _ACTIVE_WINDOW_S = 12 * 3600.0
+    _MAX_FILES = 20
+
+    def __init__(self, config_dir: Path, parent=None, base_dir: Path | None = None) -> None:
+        super().__init__("codex", config_dir, parent)
+        self.sessions_root = base_dir or (Path.home() / ".codex" / "sessions")
+        self._tailers: dict[str, ByteOffsetTailer] = {}
+        # 已判定为子代理会话的文件：判定一次就记住，不再重复读文件头
+        self._ignored: set[str] = set()
+        self._last_scan = 0.0
+
+    def _worker_started(self) -> None:
+        self._tailers.clear()
+        self._ignored.clear()
+        self._last_scan = 0.0
+
+    @staticmethod
+    def _is_user_session(path: Path) -> bool:
+        """只读文件头判定是否用户会话。
+
+        判定不出来（还没有 session_meta、文件读不了）时按"是"处理：宁可多报
+        一次状态，也不要因为一个还没写完的文件头把真实会话静默丢掉。
+        """
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                read_bytes = 0
+                for _ in range(40):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    read_bytes += len(line)
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(record, dict) and record.get("type") == "session_meta":
+                        return not codex_session_is_subagent(record.get("payload") or {})
+                    if read_bytes > 262144:
+                        break
+        except OSError:
+            return False
+        return True
+
+    def _scan(self, now: float) -> None:
+        try:
+            cutoff = now - self._ACTIVE_WINDOW_S
+            active: list[Path] = []
+            for path in self.sessions_root.glob("**/rollout-*.jsonl"):
+                try:
+                    if path.stat().st_mtime >= cutoff:
+                        active.append(path)
+                except OSError:
+                    continue
+            active.sort(key=_safe_mtime, reverse=True)
+            active = active[: self._MAX_FILES]
+        except Exception:
+            log.debug("Codex rollout 扫描异常", exc_info=True)
+            return
+
+        candidates: set[str] = set()
+        for path in active:
+            key = str(path)
+            if key in self._ignored:
+                continue
+            if key not in self._tailers:
+                if not self._is_user_session(path):
+                    self._ignored.add(key)
+                    continue
+                # ByteOffsetTailer 的 backfill 防护：首次读到已有内容会直接跳到
+                # 末尾，所以开启联动不会把历史会话重放成"刚刚在干活"。
+                self._tailers[key] = ByteOffsetTailer(key)
+            candidates.add(key)
+        # 淘汰滑出活跃窗口的 tailer，防止长时间运行无限增长
+        for stale in [k for k in self._tailers if k not in candidates]:
+            del self._tailers[stale]
+
+    def _poll(self, gen: int | None = None) -> None:
+        # 统一 jsonl 通道（兼容 agent-events/codex.jsonl 手工注入路径）
+        super()._poll(gen=gen)
+        emit_gen = self._emit_gen if gen is None else gen
+
+        if not self.sessions_root.is_dir():
+            return
+
+        now = time.time()
+        if now - self._last_scan >= self._SCAN_INTERVAL_S:
+            self._scan(now)
+
+        for tailer in list(self._tailers.values()):
+            for line in tailer.read_new_lines():
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                tool = codex_record_tool(record)
+                if tool:
+                    self._emit_tool(tool, emit_gen)
+                state = codex_record_state(record)
+                if state:
+                    self._emit_state(state, emit_gen)
+
+
 class CustomAgentMonitor(BaseAgentMonitor):
     """自定义联动 Agent 监视器（agent_link.custom_agents 配置驱动）。"""
 
@@ -2299,8 +2968,9 @@ class AgentLinkManager(QObject):
     # (session_key, operation, ok, detail)
     _exploration_control_result = Signal(str, str, bool, str)
 
-    # 联动气泡展示名
-    AGENT_NAMES = {"dsh": "DSH", "claude": "Claude Code", "cursor": "Cursor", "opencode": "OpenCode"}
+    # 联动气泡展示名。键与名的单一真相源是 pet/agent_registry.py（config 也要
+    # 用它定义 schema，而 config 是最内层模块，不能反向依赖本模块）。
+    AGENT_NAMES = dict(agent_registry.AGENT_DISPLAY_NAMES)
     # 过程汇报：工具名 → 用户可读文案（不展示原始命令/路径）
     TOOL_LABELS = {
         "read": "正在读文件", "write": "正在写文件", "edit": "正在改代码",
@@ -2312,8 +2982,32 @@ class AgentLinkManager(QObject):
         "fetch": "正在查网页", "browser": "正在查网页", "web_fetch": "正在查网页",
         "web_search": "正在查网页", "read_page": "正在读网页",
         "task": "正在派活给子代理", "todowrite": "正在列计划",
+        # —— Codex（rollout 里 custom_tool_call/function_call 的 name）——
+        # exec/exec_command 是 Codex 的通用执行工具，读文件、跑命令都走它；
+        # 单独列出来只是为了不让它落进"正在调用工具"这句兜底文案。
+        "exec": "正在跑命令", "exec_command": "正在跑命令", "shell_command": "正在跑命令",
+        "apply_patch": "正在改代码", "write_file": "正在写文件", "read_file": "正在读文件",
+        "list_dir": "正在搜索", "view_image": "正在看图片",
+        "spawn_agent": "正在派活给子代理", "send_message": "正在和子代理通气",
+        "update_plan": "正在列计划", "request_user_input": "正在问你问题",
     }
     _UNKNOWN_TOOL_LABEL = "正在调用工具"
+
+    @classmethod
+    def tool_label(cls, tool: object) -> str:
+        """工具名 → 用户可读文案；不认识返回空串（调用方决定兜底措辞）。
+
+        带命名空间的工具名（Codex 的 ``collaboration.spawn_agent``、MCP 的
+        ``mcp__x__y`` 之类）先查全名，查不到再回退到末段——否则一个明明认识
+        的工具会因为前缀而掉进"正在调用工具"。
+        """
+        key = str(tool or "").strip().lower()
+        if not key:
+            return ""
+        label = cls.TOOL_LABELS.get(key)
+        if label is None and "." in key:
+            label = cls.TOOL_LABELS.get(key.rsplit(".", 1)[-1])
+        return label or ""
     _ACTIVITY_MIN_INTERVAL = 10.0    # 同 Agent 过程气泡最小间隔
     _ACTIVITY_GLOBAL_MIN = 8.0       # 全局最小间隔（多 Agent 并发防刷屏）
     _ACTIVITY_SAME_LABEL = 60.0      # 同一工具文案 60s 内不重复
@@ -2322,6 +3016,9 @@ class AgentLinkManager(QObject):
     _DONE_CONFIRM_MS = 800   # busy→idle 稳定确认窗口（过滤 working→idle→working 抖动）
     _DONE_COOLDOWN_S = 5.0   # 同 Agent 完成气泡最小间隔（最后一道保险）
     _UNKNOWN_BRIDGE_REMIND_COOLDOWN_S = 600.0  # 未知桥接事件提醒：同 agent 10 分钟内最多一次
+    # 托管 dsh home 巡检间隔（秒→毫秒）：临时 home 是新进程建的，一分钟的发现延迟
+    # 对"看得见桌宠状态"这件事完全够用，同时把常态开销压到"每分钟几次 stat"。
+    _MANAGED_HOME_POLL_MS = 60_000
 
     def __init__(self, window: Any, config: Any, *, min_interval: float = 2.0,
                  clock: Callable[[], float] = time.time,
@@ -2342,6 +3039,9 @@ class AgentLinkManager(QObject):
         _LIVE_AGENT_LINK_MANAGERS.add(self)
         self._install_token = 0
         self._install_pending: dict[str, int] = {}
+        # 托管 dsh home 的周期巡检定时器（懒建；apply_config 按 DSH 联动开关启停）。
+        # 必须在 __init__ 末尾那次 apply_config() 之前就位。
+        self._managed_home_timer: QTimer | None = None
         # 状态节流：同一 Agent 相同状态去抖；同 Agent 两次动作切换最小间隔
         # （Cursor 等 transcript 密集写入时防止动画"抽搐"）
         self._min_interval = float(min_interval)
@@ -2390,6 +3090,7 @@ class AgentLinkManager(QObject):
             "claude": ClaudeCodeMonitor("claude", self.config_dir, self),
             "cursor": CursorMonitor(self.config_dir, self),
             "opencode": OpenCodeMonitor(self.config_dir, self),
+            "codex": CodexMonitor(self.config_dir, self),
             }
         # 自定义联动 Agent：配置驱动的只读监视器（key/path 已在 config 清洗时
         # 保证合法唯一）；显示名合并进实例级 agent_names，类级 AGENT_NAMES
@@ -2537,6 +3238,26 @@ class AgentLinkManager(QObject):
         self._behavior_detector.set_enabled(bool(agent_cfg.get("pattern_detect", True)))
         self._behavior_detector.get_config_overrides(agent_cfg if isinstance(agent_cfg, dict) else {})
         self._exploration_watchdog.configure(agent_cfg if isinstance(agent_cfg, dict) else {})
+        # 托管 dsh home 巡检：临时实例每次启动都是新目录，一次性安装留不住
+        self._sync_managed_home_poll(bool(agent_cfg.get("dsh", False)))
+
+    def _sync_managed_home_poll(self, enabled: bool) -> None:
+        """按 DSH 联动开关启停托管 home 巡检定时器。"""
+        if enabled:
+            if self._managed_home_timer is None:
+                timer = QTimer(self)
+                timer.setInterval(self._MANAGED_HOME_POLL_MS)
+                timer.timeout.connect(self._poll_managed_homes)
+                self._managed_home_timer = timer
+            self._managed_home_timer.start()
+            return
+        if self._managed_home_timer is not None:
+            self._managed_home_timer.stop()
+
+    def _poll_managed_homes(self) -> None:
+        mon = self.monitors.get("dsh")
+        if isinstance(mon, DshMonitor):
+            mon.schedule_managed_home_poll()
 
     def _install_dsh_worker(self, token: int) -> None:
         """后台线程：安装 DSH 桥接插件，完成后信号回主线程。"""
@@ -2565,6 +3286,7 @@ class AgentLinkManager(QObject):
         hints = {
             "cursor": ("Cursor", Path.home() / ".cursor" / "projects"),
             "opencode": ("OpenCode", Path.home() / ".local" / "share" / "opencode" / "opencode.db"),
+            "codex": ("Codex", Path.home() / ".codex" / "sessions"),
         }
         item = hints.get(agent_key)
         if not item:
@@ -2755,6 +3477,11 @@ class AgentLinkManager(QObject):
                 except RuntimeError:
                     pass
             timer_dict.clear()
+        if self._managed_home_timer is not None:
+            try:
+                self._managed_home_timer.stop()
+            except RuntimeError:
+                pass
         # parent=None（测试桩/多窗代理）时 C++ 对象是 Python 持有的：wrapper 经
         # 信号连接/闭包成环，只能等循环 GC——而 GC 可能在任意线程（含 monitor
         # worker 线程）触发，跨线程删除带 QTimer 子对象/信号连接的 QObject 会
@@ -2893,7 +3620,7 @@ class AgentLinkManager(QObject):
             # 避免「需要看一眼」和「完成通知」双气泡；独立出现的才立即提醒
             if prev_raw not in self._BUSY_STATES:
                 name = self.AGENT_NAMES.get(agent_key, agent_key)
-                self._show_link_bubble(self._dialogue("agent.attention", "主人，Agent 这边需要你看一眼～", agent_key=agent_key, name=name), important=True)
+                self._show_link_bubble(self._dialogue("agent.attention", "{user}，Agent 这边需要你看一眼～", agent_key=agent_key, name=name), important=True)
         elif state == "error":
             if prev_raw not in self._BUSY_STATES:
                 name = self.AGENT_NAMES.get(agent_key, agent_key)
@@ -2965,6 +3692,7 @@ class AgentLinkManager(QObject):
     AGENT_PROCESS_HINTS = {
         "opencode": ("opencode.exe",),
         "cursor": ("cursor.exe",),
+        "codex": ("codex.exe", "codex"),
     }
     AGENT_TITLE_HINTS = {
         "dsh": ("deepseek harness",),
@@ -3127,7 +3855,7 @@ class AgentLinkManager(QObject):
         if callable(mark):
             mark()
         agent_cfg = self.cfg.get("agent_link", {})
-        label = self.TOOL_LABELS.get(str(tool).strip().lower(), self._UNKNOWN_TOOL_LABEL)
+        label = self.tool_label(tool) or self._UNKNOWN_TOOL_LABEL
         now = self._clock()
         last = self._last_activity.get(agent_key)
         if last is not None:
@@ -3222,8 +3950,7 @@ class AgentLinkManager(QObject):
                 command=formatted, name=name, **conditional,
             )
         else:
-            tool_lower = tool.lower()
-            label = self.TOOL_LABELS.get(tool_lower, "")
+            label = self.tool_label(tool)
             if label:
                 text = self._dialogue(
                     "approval.tool", f"{prefix}{name} 在请求审批：{label}，请选择：",
@@ -3846,7 +4573,7 @@ class AgentLinkManager(QObject):
         name = self.agent_names.get(agent_key, agent_key)
         if agent_key in self._saw_alert:
             # busy 期间出现过 attention/error：不暗示"成功完成"
-            text = self._dialogue("done.attention", f"{name} 那边停了，结果怎么样要主人自己看一眼哦", agent_key=agent_key, name=name)
+            text = self._dialogue("done.attention", f"{name} 那边停了，结果怎么样要{{user}}自己看一眼哦", agent_key=agent_key, name=name)
         else:
             text = self._dialogue("done.success", f"{name} 干完活啦，去看看成果吧～", agent_key=agent_key, name=name)
         self._saw_alert.discard(agent_key)

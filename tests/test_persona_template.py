@@ -92,7 +92,8 @@ def test_all_advertised_fields_reach_presentation_layer():
 
     # variables/upstream 结构 sanity：cordis 等死字段不得回流
     assert set(VARIABLES) == {
-        "name", "command", "label", "body", "count", "reasons", "detail", "text",
+        # user：渲染层为所有事件统一注入的称呼（不进 PARAMETERS，见 GLOBAL_PARAMETERS）
+        "name", "user", "command", "label", "body", "count", "reasons", "detail", "text",
         "tool", "toolName", "argsKey", "callId", "step",
         "sessionName", "projectName", "event",
         "errorCode", "errorMessage", "errorKind", "consecutiveRetryCount", "retry",
