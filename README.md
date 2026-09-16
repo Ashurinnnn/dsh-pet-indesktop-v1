@@ -12,8 +12,7 @@
 
 上游是一个基于 **Python + PySide6** 的独立桌面宠物（透明无边框、置顶、可拖动、动画播放、
 系统托盘、可选 AI 对话与本地 agent 联动）。上游的完整文档保留在
-**[README-UPSTREAM.md](README-UPSTREAM.md)** —— 功能清单、设置项、素材规范、打包说明都在那里，
-本文件只讲**这个 fork 改了什么**。
+**[README-UPSTREAM.md](README-UPSTREAM.md)**。
 
 ---
 
